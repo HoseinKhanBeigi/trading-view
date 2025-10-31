@@ -27,12 +27,12 @@ export default function SymbolPage() {
         <div className="xl:col-span-2 order-2 xl:order-none">
           <SymbolsList />
         </div>
-        <div className="xl:col-span-7 space-y-6">
+        <div className="xl:col-span-6 space-y-6">
           <CandlesChart />
           <OrderTicket />
           <OrdersList />
         </div>
-        <div className="xl:col-span-3">
+        <div className="xl:col-span-4">
           <OrderBookPanel />
         </div>
       </div>

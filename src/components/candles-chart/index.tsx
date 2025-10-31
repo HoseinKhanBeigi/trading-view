@@ -14,6 +14,11 @@ export default function CandlesChart() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const seededRef = useRef(false);
+  const candles = useMarketStore((s) => s.candles);
+  const last = candles[candles.length - 1];
+  const first = candles[0];
+  const lastPrice = last?.close;
+  const changePct = last && first ? ((last.close - first.open) / first.open) * 100 : undefined;
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -124,7 +129,16 @@ export default function CandlesChart() {
       <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 shadow-sm overflow-hidden ">
         <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-3 border-b border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-950 transition-colors duration-200 dark-mode-bg dark-mode-text">
           <div className="flex items-center gap-3">
-            <h2 className="text-sm sm:text-base font-semibold dark-mode-text">Candlestick Chart</h2>
+            {lastPrice != null && (
+              <div className="flex items-center gap-2 text-xs sm:text-sm">
+                <span className="font-mono tabular-nums dark-mode-text">{lastPrice.toFixed(2)}</span>
+                {changePct != null && (
+                  <span className={`font-mono tabular-nums ${changePct >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%
+                  </span>
+                )}
+              </div>
+            )}
             <div className="hidden sm:flex items-center gap-2">
               <StatusBadge />
               <LatencyBadge />

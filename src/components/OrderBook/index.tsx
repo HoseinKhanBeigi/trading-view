@@ -9,7 +9,7 @@ import { fetchDepthSnapshot } from "@/lib/binance";
 export default function OrderBookPanel() {
   const symbol = useMarketStore((s) => s.symbol);
   const [book, setBook] = useState<OrderBook | null>(null);
-  const [lastChangedPrice, setLastChangedPrice] = useState<number | null>(null);
+  const [updatedPrices, setUpdatedPrices] = useState<Set<number>>(new Set());
   const bufferRef = useRef<any[]>([]);
   const syncingRef = useRef(false);
 
@@ -38,8 +38,23 @@ export default function OrderBookPanel() {
           return prev;
         }
         const next = res.next;
-        const chPrice = changedPrice(prev, next);
-        if (chPrice != null) setLastChangedPrice(chPrice);
+        const prices = new Set<number>();
+        (diff.b || []).forEach(([p]: [string, string]) => prices.add(parseFloat(p)));
+        (diff.a || []).forEach(([p]: [string, string]) => prices.add(parseFloat(p)));
+        if (prices.size > 0) {
+          setUpdatedPrices((old) => {
+            const merged = new Set(old);
+            prices.forEach((p) => merged.add(p));
+            return merged;
+          });
+          setTimeout(() => {
+            setUpdatedPrices((old) => {
+              const copy = new Set(old);
+              prices.forEach((p) => copy.delete(p));
+              return copy;
+            });
+          }, 800);
+        }
         return next;
       });
     });
@@ -103,57 +118,53 @@ export default function OrderBookPanel() {
 
       <div className="grid grid-cols-2 text-xs">
         <div className="p-2 space-y-1">
-          <div className="flex justify-between text-zinc-500">
+          <div className="grid grid-cols-[1.1fr_1.2fr_1fr] items-center gap-3 text-zinc-500 px-3 font-mono tabular-nums whitespace-nowrap">
             <span>Bid Size</span>
-            <span>Bid Price</span>
+            <span>Bid Total</span>
+            <span className="text-right">Bid Price</span>
           </div>
           {display.bids.map((l, i) => (
-            <Row key={`b-${l.price}`} price={l.price} size={l.size} side="bid" highlight={lastChangedPrice === l.price} heatPct={heat.bids.max ? (heat.bids.cum[i] / heat.bids.max) : 0} />
+            <Row key={`b-${l.price}`} price={l.price} size={l.size} total={l.size * l.price} side="bid" highlight={updatedPrices.has(l.price)} heatPct={heat.bids.max ? (heat.bids.cum[i] / heat.bids.max) : 0} />
           ))}
         </div>
         <div className="p-2 space-y-1">
-          <div className="flex justify-between text-zinc-500">
+          <div className="grid grid-cols-[1fr_1.2fr_1.1fr] items-center gap-3 text-zinc-500 px-3 font-mono tabular-nums whitespace-nowrap">
             <span>Ask Price</span>
-            <span>Ask Size</span>
+            <span>Ask Total</span>
+            <span className="text-right">Ask Size</span>
           </div>
           {display.asks.map((l, i) => (
-            <Row key={`a-${l.price}`} price={l.price} size={l.size} side="ask" highlight={lastChangedPrice === l.price} heatPct={heat.asks.max ? (heat.asks.cum[i] / heat.asks.max) : 0} />)
-          )}
+            <Row key={`a-${l.price}`} price={l.price} size={l.size} total={l.size * l.price} side="ask" highlight={updatedPrices.has(l.price)} heatPct={heat.asks.max ? (heat.asks.cum[i] / heat.asks.max) : 0} />
+          ))}
         </div>
       </div>
     </section>
   );
 }
 
-function Row({ price, size, side, highlight, heatPct }: { price: number; size: number; side: 'bid' | 'ask'; highlight: boolean; heatPct: number }) {
+function Row({ price, size, total, side, highlight, heatPct }: { price: number; size: number; total: number; side: 'bid' | 'ask'; highlight: boolean; heatPct: number }) {
   return (
-    <div className={`relative flex justify-between px-2 py-1 rounded overflow-hidden ${highlight ? (side === 'bid' ? 'bg-emerald-500/10' : 'bg-rose-500/10') : ''}`}>
+    <div className={`relative grid grid-cols-[1.1fr_1.2fr_1fr] items-center gap-3 px-3 py-1 rounded overflow-hidden transition-colors font-mono tabular-nums whitespace-nowrap ${highlight ? (side === 'bid' ? 'bg-emerald-500/15' : 'bg-rose-500/15') : ''}`}>
       <span
-        className={`absolute inset-y-0 ${side==='bid' ? 'left-0 bg-emerald-500/15' : 'right-0 bg-rose-500/15'}`}
+        className={`absolute inset-y-0 ${side==='bid' ? 'left-0 bg-emerald-500/15' : 'right-0 bg-rose-500/15'} z-0 pointer-events-none`}
         style={{ width: `${Math.max(0, Math.min(100, Math.round(heatPct * 100)))}%` }}
         aria-hidden="true"
       />
       {side === 'bid' ? (
         <>
-          <span className="font-mono tabular-nums text-emerald-500">{size.toFixed(6)}</span>
-          <span className="font-mono tabular-nums text-emerald-600">{price.toFixed(2)}</span>
+          <span className="relative z-10 text-emerald-500">{size.toFixed(4)}</span>
+          <span className="relative z-10 text-zinc-500 text-center">{total.toFixed(2)}</span>
+          <span className="relative z-10 text-right text-emerald-600">{price.toFixed(2)}</span>
         </>
       ) : (
         <>
-          <span className="font-mono tabular-nums text-rose-600">{price.toFixed(2)}</span>
-          <span className="font-mono tabular-nums text-rose-500">{size.toFixed(6)}</span>
+          <span className="relative z-10 text-rose-600">{price.toFixed(2)}</span>
+          <span className="relative z-10 text-zinc-500 text-center">{total.toFixed(2)}</span>
+          <span className="relative z-10 text-right text-rose-500">{size.toFixed(4)}</span>
         </>
       )}
     </div>
   );
-}
-
-function changedPrice(prev: OrderBook, next: OrderBook): number | null {
-  const pb = prev.bids[0]?.price, nb = next.bids[0]?.price;
-  if (pb !== nb && nb != null) return nb;
-  const pa = prev.asks[0]?.price, na = next.asks[0]?.price;
-  if (pa !== na && na != null) return na;
-  return null;
 }
 
 

@@ -119,6 +119,13 @@ function FormCard({ title, side, qty, setQty, price, setPrice, bestBid, bestAsk,
         <div>Best Ask: {bestAsk.toFixed(2)}</div>
         <div>Fill Price: {entry.toFixed(2)}</div>
         <div>Est. PnL ±0.5%: {pnl.up.toFixed(2)} / {pnl.down.toFixed(2)}</div>
+        <div className="col-span-2">
+          {side==='buy' ? (
+            <span>Estimated Cost: <span className="font-mono tabular-nums">{(parsedQty * entry || 0).toFixed(2)}</span> USD</span>
+          ) : (
+            <span>Estimated Proceeds: <span className="font-mono tabular-nums">{(parsedQty * entry || 0).toFixed(2)}</span> USD</span>
+          )}
+        </div>
       </div>
       <button onClick={() => place(side, qty, price)} className={`mt-3 w-full py-2 rounded ${side==='buy' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-rose-600 hover:bg-rose-700'} text-white`}>
         {title}
