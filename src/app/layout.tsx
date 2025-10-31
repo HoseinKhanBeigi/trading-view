@@ -2,8 +2,6 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/contexts/ThemeContext";
-import HeaderNav from "@/components/header-nav";
-import { SymbolsList } from "@/components/SymbolsList";
 import { DarkModeToggle } from "@/components/DarkModeToggle";
 import { StatusBadge } from "@/components/StatusBadge";
 import ToasterClient from "@/components/ToasterClient";
