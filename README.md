@@ -42,6 +42,17 @@ Covered:
 - `src/lib/candles.ts` trades → 1m OHLC
 - `src/lib/risk.ts` validations & PnL calc
 
+Optional E2E (Playwright):
+
+```bash
+npx playwright install
+npm run test:e2e
+# or
+yarn test:e2e
+```
+
+Flow: open BTCUSDT, place a Buy order, verify balances updated and success toast.
+
 ## Exchange choice & tradeoffs
 
 - Exchange: Binance — robust public REST/WS, simple klines/depth streams, reliable docs.

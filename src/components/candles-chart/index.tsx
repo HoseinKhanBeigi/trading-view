@@ -40,6 +40,14 @@ export default function CandlesChart() {
     const vwapUp: ISeriesApi<'Line'> = chart.addSeries(LineSeries, { color: "#60a5fa", lineStyle: LineStyle.Dotted });
     const vwapDn: ISeriesApi<'Line'> = chart.addSeries(LineSeries, { color: "#60a5fa", lineStyle: LineStyle.Dotted });
 
+    // initial size + responsive resize
+    function resizeToContainer() {
+      const el = chartContainerRef.current as HTMLDivElement;
+      if (!el) return;
+      const { width, height } = el.getBoundingClientRect();
+      if (width > 0 && height > 0) chart.resize(Math.floor(width), Math.floor(height));
+    }
+    resizeToContainer();
     chart.timeScale().fitContent();
 
     const unsubCandles = useMarketStore.subscribe((state) => {
@@ -75,6 +83,11 @@ export default function CandlesChart() {
     });
     chart.timeScale().scrollToRealTime();
 
+    const ro = new ResizeObserver(() => {
+      resizeToContainer();
+    });
+    ro.observe(chartContainerRef.current);
+
     const onThemeChange = (e: any) => {
       const dark = e?.detail?.theme ? e.detail.theme === 'dark' : document.documentElement.classList.contains('dark');
       chart.applyOptions({
@@ -100,6 +113,7 @@ export default function CandlesChart() {
       unsubCandles();
       stopKlines();
       chart.remove();
+      try { ro.disconnect(); } catch {}
       themeObserver.disconnect();
       window.removeEventListener('themechange', onThemeChange as any);
     };
