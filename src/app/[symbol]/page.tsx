@@ -4,6 +4,9 @@ import CandlesChart from "@/components/candles-chart";
 import OrderBookPanel from "@/components/OrderBook";
 import OrderTicket from "@/components/OrderTicket";
 import OrdersList from "@/components/OrdersList";
+import FuturesTicket from "@/components/FuturesTicket";
+import PositionsPanel from "@/components/PositionsPanel";
+import OrdersTable from "@/components/OrdersTable";
 import { useMarketStore } from "@/store";
 import { useParams } from "next/navigation";
 import { startKlines, stopKlines } from "@/store/actions/candles";
@@ -30,10 +33,13 @@ export default function SymbolPage() {
         <div className="xl:col-span-6 space-y-6">
           <CandlesChart />
           <OrderTicket />
+          <FuturesTicket />
+          <OrdersTable />
           <OrdersList />
         </div>
-        <div className="xl:col-span-4">
+        <div className="xl:col-span-4 space-y-6">
           <OrderBookPanel />
+          <PositionsPanel />
         </div>
       </div>
     </div>

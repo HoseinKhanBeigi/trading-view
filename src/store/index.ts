@@ -4,8 +4,9 @@ import { createDepthSlice, DepthSlice } from "@/store/slices/depth";
 import { createSymbolSlice, SymbolSlice } from "@/store/slices/symbol";
 import { createCandlesSlice, CandlesSlice } from "@/store/slices/candles";
 import { createOrdersSlice, OrdersSlice } from "@/store/slices/orders";
+import { createPositionsSlice, PositionsSlice } from "@/store/slices/positions";
 
-export type RootState = TradesSlice & DepthSlice & SymbolSlice & CandlesSlice & OrdersSlice;
+export type RootState = TradesSlice & DepthSlice & SymbolSlice & CandlesSlice & OrdersSlice & PositionsSlice;
 
 export const useMarketStore = create<RootState>((set, get) => {
   const trades = createTradesSlice();
@@ -13,6 +14,7 @@ export const useMarketStore = create<RootState>((set, get) => {
   const symbol = createSymbolSlice();
   const candles = createCandlesSlice();
   const orders = createOrdersSlice();
+  const positions = createPositionsSlice();
 
   return {
     ...trades,
@@ -20,6 +22,7 @@ export const useMarketStore = create<RootState>((set, get) => {
     ...symbol,
     ...candles,
     ...orders,
+    ...positions,
 
     // bind setters to Zustand set API
     setTrades: (updater) => set((s) => ({ trades: updater(s.trades) })),
@@ -48,6 +51,11 @@ export const useMarketStore = create<RootState>((set, get) => {
     addOrder: (order) => set((s) => ({ orders: [order, ...s.orders].slice(0, 100) })),
     clearOrders: () => set({ orders: [] }),
     cancelOrder: (id) => set((s) => ({ orders: s.orders.map(o => o.id === id ? { ...o, status: 'cancelled' } : o) })),
+
+    // positions actions
+    addPosition: (pos) => set((s) => ({ positions: [...s.positions, pos] })),
+    closePosition: (id) => set((s) => ({ positions: s.positions.filter(p => p.id !== id) })),
+    clearPositions: () => set({ positions: [] }),
   } as RootState;
 });
 
