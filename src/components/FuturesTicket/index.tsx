@@ -53,6 +53,12 @@ export default function FuturesTicket() {
   const finalSize = value && entryPrice > 0 ? (parsedValue / entryPrice) : parsedSize;
   const margin = entryPrice > 0 ? (finalSize * entryPrice / leverage) : 0;
   const notional = entryPrice > 0 ? (finalSize * entryPrice) : 0;
+  // Liquidation price calculation
+  const liquidationPrice = entryPrice > 0 && leverage > 0
+    ? side === 'long'
+      ? entryPrice * (1 - 1 / leverage) // Long liquidates when price drops
+      : entryPrice * (1 + 1 / leverage)  // Short liquidates when price rises
+    : 0;
 
   function openPosition() {
     if (lastPrice <= 0) {
@@ -236,6 +242,19 @@ export default function FuturesTicket() {
           <div>قیمت: {entryPrice > 0 ? entryPrice.toFixed(2) : lastPrice.toFixed(2)}</div>
           <div>هزینه (Notional): {notional.toFixed(2)} USD</div>
           <div>Required Margin: {margin.toFixed(2)} USD</div>
+          {liquidationPrice > 0 && (
+            <div className={`mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-700 ${side === 'long' && lastPrice <= liquidationPrice * 1.05 ? 'text-rose-600' : side === 'short' && lastPrice >= liquidationPrice * 0.95 ? 'text-rose-600' : 'text-amber-600'}`}>
+              <div className="font-semibold">Liquidation Price: {liquidationPrice.toFixed(2)}</div>
+              {lastPrice > 0 && (
+                <div className="text-xs mt-1">
+                  {side === 'long' 
+                    ? `Price drop: ${((entryPrice - liquidationPrice) / entryPrice * 100).toFixed(2)}%`
+                    : `Price rise: ${((liquidationPrice - entryPrice) / entryPrice * 100).toFixed(2)}%`
+                  }
+                </div>
+              )}
+            </div>
+          )}
         </div>
         <button 
           onClick={openPosition} 

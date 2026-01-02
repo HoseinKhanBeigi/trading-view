@@ -31,7 +31,14 @@ export default function PositionsPanel() {
         ? (priceDiff * pos.size * pos.leverage)
         : (-priceDiff * pos.size * pos.leverage);
       const pnlPct = (pnl / pos.margin) * 100;
-      return { ...pos, pnl, pnlPct, currentPrice: lastPrice };
+      // Liquidation price
+      const liquidationPrice = pos.side === 'long'
+        ? pos.entryPrice * (1 - 1 / pos.leverage)
+        : pos.entryPrice * (1 + 1 / pos.leverage);
+      const distanceToLiquidation = pos.side === 'long'
+        ? ((lastPrice - liquidationPrice) / lastPrice) * 100
+        : ((liquidationPrice - lastPrice) / lastPrice) * 100;
+      return { ...pos, pnl, pnlPct, currentPrice: lastPrice, liquidationPrice, distanceToLiquidation };
     });
   }, [positions, lastPrice]);
 
@@ -71,6 +78,9 @@ export default function PositionsPanel() {
                 <span className="font-mono tabular-nums dark-mode-text">{p.size} {p.symbol.slice(0,3)}</span>
                 <span className="text-xs text-zinc-500 dark:text-zinc-400">
                   Entry: {p.entryPrice.toFixed(2)} | {p.leverage}x
+                </span>
+                <span className={`text-xs ${p.distanceToLiquidation < 5 ? 'text-rose-600 font-semibold' : p.distanceToLiquidation < 10 ? 'text-amber-600' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                  Liq: {p.liquidationPrice.toFixed(2)} ({p.distanceToLiquidation.toFixed(2)}% away)
                 </span>
               </div>
             </div>
