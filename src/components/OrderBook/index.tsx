@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMarketStore } from "@/store";
 import { startDepth, stopDepth } from "@/store/actions/depth";
-import { tryApplyDiff, fromSnapshot, OrderBook, topN, spreadMid, vwapTop20 } from "@/lib/orderbook";
+import { tryApplyDiff, fromSnapshot, OrderBook, topN, spreadMid, vwapTop20, identifySupportResistance } from "@/lib/orderbook";
 import { fetchDepthSnapshot } from "@/lib/binance";
 import { OrderBookStrengthTracker, type StrengthMetrics, type PredictionMetrics } from "@/lib/orderbook-strength";
 
@@ -157,6 +157,14 @@ export default function OrderBookPanel() {
     return { bids: { cum: cumBids, max: maxB }, asks: { cum: cumAsks, max: maxA } };
   }, [book]);
   const meta = useMemo(() => (book ? { ...spreadMid(book), vwap: vwapTop20(book) } : null), [book]);
+  const supportResistance = useMemo(() => {
+    if (!book) return { support: [], resistance: [] };
+    return identifySupportResistance(book, {
+      minSizePercentile: 80, // Only show top 20% largest orders
+      maxLevels: 5, // Show top 5 support/resistance levels
+      lookbackLevels: 100, // Analyze first 100 levels
+    });
+  }, [book]);
 
   return (
     <section className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 dark-mode-bg overflow-hidden">
@@ -192,6 +200,52 @@ export default function OrderBookPanel() {
               <PredictionIndicator label="+1m" prediction={prediction1m} />
               <PredictionIndicator label="+3m" prediction={prediction3m} />
               <PredictionIndicator label="+5m" prediction={prediction5m} />
+            </div>
+          </div>
+        )}
+        {/* Support/Resistance Levels */}
+        {(supportResistance.support.length > 0 || supportResistance.resistance.length > 0) && (
+          <div className="mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">
+            <div className="text-[10px] text-zinc-500 dark:text-zinc-400 font-semibold mb-1.5">
+              Support/Resistance (Large Orders):
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[10px]">
+              <div>
+                <div className="text-emerald-600 dark:text-emerald-400 font-semibold mb-1">Support (Bids):</div>
+                {supportResistance.support.slice(0, 3).map((level, i) => (
+                  <div key={i} className="flex items-center justify-between mb-0.5">
+                    <span className="text-emerald-500 font-mono">{level.price.toFixed(2)}</span>
+                    <span className="text-zinc-500">
+                      {formatCurrency(level.notional)} 
+                      <span className={`ml-1 ${
+                        level.strength === 'strong' ? 'text-emerald-400' : 
+                        level.strength === 'medium' ? 'text-yellow-500' : 
+                        'text-zinc-400'
+                      }`}>
+                        ({level.strength})
+                      </span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <div className="text-rose-600 dark:text-rose-400 font-semibold mb-1">Resistance (Asks):</div>
+                {supportResistance.resistance.slice(0, 3).map((level, i) => (
+                  <div key={i} className="flex items-center justify-between mb-0.5">
+                    <span className="text-rose-500 font-mono">{level.price.toFixed(2)}</span>
+                    <span className="text-zinc-500">
+                      {formatCurrency(level.notional)}
+                      <span className={`ml-1 ${
+                        level.strength === 'strong' ? 'text-rose-400' : 
+                        level.strength === 'medium' ? 'text-yellow-500' : 
+                        'text-zinc-400'
+                      }`}>
+                        ({level.strength})
+                      </span>
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         )}

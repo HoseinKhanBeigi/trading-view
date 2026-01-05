@@ -83,6 +83,119 @@ export function vwapTop20(book: OrderBook) {
   return { bid: vwap(bids), ask: vwap(asks) };
 }
 
+export type SupportResistanceLevel = {
+  price: number;
+  size: number;
+  notional: number; // price * size
+  type: 'support' | 'resistance';
+  strength: 'weak' | 'medium' | 'strong'; // based on size relative to average
+  percentile: number; // 0-100, how large this order is compared to others
+};
+
+/**
+ * Identify support and resistance levels from large orders in the order book
+ * @param book The order book
+ * @param options Configuration options
+ * @returns Array of support/resistance levels sorted by strength
+ */
+export function identifySupportResistance(
+  book: OrderBook,
+  options: {
+    minSizePercentile?: number; // Minimum percentile to consider (default: 75th percentile)
+    maxLevels?: number; // Maximum number of levels to return per side (default: 10)
+    lookbackLevels?: number; // How many levels to analyze (default: 100)
+  } = {}
+): { support: SupportResistanceLevel[]; resistance: SupportResistanceLevel[] } {
+  const {
+    minSizePercentile = 75,
+    maxLevels = 10,
+    lookbackLevels = 100,
+  } = options;
+
+  // Analyze bids (support) and asks (resistance)
+  const analyzeSide = (
+    levels: BookLevel[],
+    type: 'support' | 'resistance'
+  ): SupportResistanceLevel[] => {
+    const analyzed = levels.slice(0, lookbackLevels);
+    
+    if (analyzed.length === 0) return [];
+
+    // Calculate size statistics
+    const sizes = analyzed.map(l => l.size);
+    const sortedSizes = [...sizes].sort((a, b) => a - b);
+    const avgSize = sizes.reduce((a, b) => a + b, 0) / sizes.length;
+    const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
+    const percentileIndex = Math.floor((minSizePercentile / 100) * sortedSizes.length);
+    const minSizeThreshold = sortedSizes[percentileIndex] || 0;
+
+    // Identify large orders
+    const largeOrders: SupportResistanceLevel[] = analyzed
+      .map((level) => {
+        const notional = level.price * level.size;
+        const percentile = (sortedSizes.filter(s => s <= level.size).length / sortedSizes.length) * 100;
+        
+        // Determine strength based on size relative to average
+        const sizeRatio = level.size / avgSize;
+        let strength: 'weak' | 'medium' | 'strong';
+        if (sizeRatio >= 3) strength = 'strong';
+        else if (sizeRatio >= 1.5) strength = 'medium';
+        else strength = 'weak';
+
+        return {
+          price: level.price,
+          size: level.size,
+          notional,
+          type,
+          strength,
+          percentile: Math.round(percentile),
+        };
+      })
+      .filter((level) => level.size >= minSizeThreshold)
+      .sort((a, b) => b.size - a.size) // Sort by size descending
+      .slice(0, maxLevels)
+      .sort((a, b) => (type === 'support' ? b.price - a.price : a.price - b.price)); // Sort by price
+
+    return largeOrders;
+  };
+
+  return {
+    support: analyzeSide(book.bids, 'support'),
+    resistance: analyzeSide(book.asks, 'resistance'),
+  };
+}
+
+/**
+ * Get cumulative order size at a specific price level (including nearby levels within a threshold)
+ * Useful for identifying price zones with concentrated orders
+ */
+export function getCumulativeSizeAtLevel(
+  book: OrderBook,
+  targetPrice: number,
+  priceThreshold: number = 0.001 // 0.1% price difference threshold
+): { bidSize: number; askSize: number; totalSize: number } {
+  let bidSize = 0;
+  let askSize = 0;
+
+  for (const level of book.bids) {
+    if (Math.abs(level.price - targetPrice) / targetPrice <= priceThreshold) {
+      bidSize += level.size;
+    }
+  }
+
+  for (const level of book.asks) {
+    if (Math.abs(level.price - targetPrice) / targetPrice <= priceThreshold) {
+      askSize += level.size;
+    }
+  }
+
+  return {
+    bidSize,
+    askSize,
+    totalSize: bidSize + askSize,
+  };
+}
+
 function normalizeSide(levels: [string, string][], side: 'bids' | 'asks'): BookLevel[] {
   const arr = levels
     .map(([p, s]) => ({ price: parseFloat(p), size: parseFloat(s) }))
