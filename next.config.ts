@@ -2,8 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   env: {
-    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-    
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY  
   },
   /* config options here */
 };
