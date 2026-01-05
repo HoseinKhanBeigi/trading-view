@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, positions } = await req.json();
+    const { messages, positions, candles, interval, symbol } = await req.json();
 
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
@@ -12,21 +12,56 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Prepare system message with position context
-    const systemMessage = positions && positions.length > 0
-      ? `You are a professional trading assistant. Analyze the following open positions and provide recommendations on which position is better for entry or management.
-
-Current positions:
-${JSON.stringify(positions, null, 2)}
-
-Provide clear, concise analysis focusing on:
-1. Which position has better entry conditions
-2. Risk/reward ratios
-3. Market conditions affecting each position
-4. Suggested actions (enter new, manage existing, or exit)
-
-Be professional and data-driven in your analysis.`
-      : `You are a professional trading assistant. Help users with trading questions and position analysis.`;
+    // Prepare system message with position and candle data context
+    let systemMessage = `You are a professional trading assistant specializing in technical analysis. `;
+    
+    if (candles && candles.length > 0) {
+      systemMessage += `Analyze the last ${candles.length} candlestick candles (${interval || '5m'} timeframe) for ${symbol || 'the trading pair'} and perform technical analysis. `;
+    }
+    
+    if (positions && positions.length > 0) {
+      systemMessage += `IMPORTANT: All positions shown are MOCK/SIMULATED positions for testing purposes only. `;
+      systemMessage += `Based on the technical analysis of the candles and the current mock positions, provide entry position recommendations. `;
+    } else {
+      systemMessage += `Based on the technical analysis of the candles, provide entry position recommendations. `;
+    }
+    
+    systemMessage += `\n\nProvide clear, concise analysis focusing on:\n`;
+    systemMessage += `1. Technical indicators and patterns (support/resistance, trend, momentum, etc.)\n`;
+    systemMessage += `2. Entry recommendations (LONG or SHORT) with reasoning\n`;
+    systemMessage += `3. Suggested entry price levels\n`;
+    systemMessage += `4. Risk/reward assessment\n`;
+    
+    if (positions && positions.length > 0) {
+      systemMessage += `5. Comparison with existing mock positions\n`;
+      systemMessage += `6. Suggested actions for existing positions (hold, exit, or adjust)\n`;
+    }
+    
+    systemMessage += `\nBe professional, data-driven, and focus on technical analysis fundamentals.`;
+    
+    // Build the context data for the system message
+    let contextData = '';
+    
+    if (candles && candles.length > 0) {
+      contextData += `\n\nCANDLE DATA (Last ${candles.length} candles, ${interval || '5m'} timeframe):\n`;
+      contextData += `Format: [time, open, high, low, close]\n`;
+      // Send candles in a compact format
+      const candlesFormatted = candles.map((c: { time: number | string; open: number; high: number; low: number; close: number }) => [
+        c.time,
+        c.open.toFixed(2),
+        c.high.toFixed(2),
+        c.low.toFixed(2),
+        c.close.toFixed(2)
+      ]);
+      contextData += JSON.stringify(candlesFormatted, null, 2);
+    }
+    
+    if (positions && positions.length > 0) {
+      contextData += `\n\nMOCK POSITIONS (Simulated for testing):\n`;
+      contextData += JSON.stringify(positions, null, 2);
+    }
+    
+    systemMessage += contextData;
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -41,7 +76,7 @@ Be professional and data-driven in your analysis.`
           ...messages,
         ],
         temperature: 0.7,
-        max_tokens: 1000,
+        max_tokens: 2000,
       }),
     });
 

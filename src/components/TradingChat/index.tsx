@@ -12,6 +12,8 @@ interface Message {
 export default function TradingChat() {
   const positions = useMarketStore((s) => s.positions);
   const candles = useMarketStore((s) => s.candles);
+  const interval = useMarketStore((s) => s.interval);
+  const symbol = useMarketStore((s) => s.symbol);
   const lastPrice = candles[candles.length - 1]?.close ?? 0;
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -33,7 +35,7 @@ export default function TradingChat() {
     setIsLoading(true);
     const userMessage: Message = {
       role: 'user',
-      content: 'Analyze my open positions and tell me which one is better for entry.',
+      content: 'Based on the last 100 candles and my current mock positions, perform technical analysis and give me entry position recommendations.',
       timestamp: Date.now(),
     };
     
@@ -57,12 +59,24 @@ export default function TradingChat() {
           : ((pos.entryPrice - lastPrice) / pos.entryPrice) * 100 * pos.leverage,
       }));
 
+      // Get last 100 candles (or all if less than 100)
+      const last100Candles = candles.slice(-100).map(c => ({
+        time: c.time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }));
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: [{ role: 'user', content: userMessage.content }],
           positions: positionsWithContext,
+          candles: last100Candles,
+          interval: interval,
+          symbol: symbol,
         }),
       });
 
@@ -88,7 +102,7 @@ export default function TradingChat() {
     } finally {
       setIsLoading(false);
     }
-  }, [positions, lastPrice]);
+  }, [positions, lastPrice, candles, interval, symbol]);
 
   // Auto-analyze when positions change
   useEffect(() => {
@@ -127,6 +141,15 @@ export default function TradingChat() {
           }))
         : undefined;
 
+      // Get last 100 candles for context
+      const last100Candles = candles.slice(-100).map(c => ({
+        time: c.time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }));
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -135,6 +158,9 @@ export default function TradingChat() {
             { role: 'user', content: input }
           ]),
           positions: positionsWithContext,
+          candles: last100Candles,
+          interval: interval,
+          symbol: symbol,
         }),
       });
 
