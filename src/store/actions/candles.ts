@@ -3,11 +3,11 @@ import { toUTCTimestamp } from "@/utils/time";
 import type { CandlestickData } from "lightweight-charts";
 
 function klineWsUrl(symbol: string, interval: string): string {
-  return `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@kline_${interval}`;
+  return `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${interval}`;
 }
 
 function klineRestUrl(symbol: string, interval: string, limit = 500): string {
-  const u = new URL("https://api.binance.com/api/v3/klines");
+  const u = new URL("https://fapi.binance.com/fapi/v1/klines");
   u.searchParams.set("symbol", symbol.toUpperCase());
   u.searchParams.set("interval", interval);
   u.searchParams.set("limit", String(limit));

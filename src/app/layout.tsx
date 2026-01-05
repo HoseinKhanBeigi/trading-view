@@ -4,6 +4,8 @@ import "./globals.css";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { DarkModeToggle } from "@/components/DarkModeToggle";
 import { StatusBadge } from "@/components/StatusBadge";
+import { HeaderPrice } from "@/components/HeaderPrice";
+import { DynamicTitle } from "@/components/DynamicTitle";
 import ToasterClient from "@/components/ToasterClient";
 
 const geistSans = Geist({
@@ -49,6 +51,7 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         <ThemeProvider>
+          <DynamicTitle />
           <div className="min-h-screen dark-mode-bg dark-mode-text">
             <ToasterClient />
             {/* Header */}
@@ -58,6 +61,7 @@ export default function RootLayout({
                   <div className="flex items-center space-x-4">
                     <h1 className="text-xl font-bold dark-mode-text">Pooleno Trading</h1>
                     <div className="text-sm dark-mode-text-secondary">BTC/USDT</div>
+                    <HeaderPrice />
                   </div>
 
                   <div className="flex items-center space-x-4">

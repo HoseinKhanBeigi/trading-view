@@ -1,17 +1,17 @@
 export type BinanceSymbol = string; // e.g. "BTCUSDT"
 
-// WebSocket endpoints
+// WebSocket endpoints (Futures)
 export function tradeWsUrl(symbol: BinanceSymbol): string {
-  return `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@trade`;
+  return `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@trade`;
 }
 
 export function depthWsUrl(symbol: BinanceSymbol, speed: '100ms' | '1000ms' = '100ms'): string {
-  return `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@depth@${speed}`;
+  return `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@depth@${speed}`;
 }
 
-// REST depth snapshot (for order book sync)
+// REST depth snapshot (for order book sync) - Futures
 export function depthSnapshotUrl(symbol: BinanceSymbol, limit: 5 | 10 | 20 | 50 | 100 | 500 | 1000 = 1000): string {
-  return `https://api.binance.com/api/v3/depth?symbol=${symbol.toUpperCase()}&limit=${limit}`;
+  return `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol.toUpperCase()}&limit=${limit}`;
 }
 
 export async function fetchDepthSnapshot(symbol: BinanceSymbol, limit: 5 | 10 | 20 | 50 | 100 | 500 | 1000 = 1000) {

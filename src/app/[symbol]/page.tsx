@@ -7,6 +7,7 @@ import OrdersList from "@/components/OrdersList";
 import FuturesTicket from "@/components/FuturesTicket";
 import PositionsPanel from "@/components/PositionsPanel";
 import OrdersTable from "@/components/OrdersTable";
+import TradingChat from "@/components/TradingChat";
 import { useMarketStore } from "@/store";
 import { useParams } from "next/navigation";
 import { startKlines, stopKlines } from "@/store/actions/candles";
@@ -40,6 +41,7 @@ export default function SymbolPage() {
         <div className="xl:col-span-4 space-y-6">
           <OrderBookPanel />
           <PositionsPanel />
+          <TradingChat />
         </div>
       </div>
     </div>
