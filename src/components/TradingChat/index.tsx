@@ -12,6 +12,7 @@ interface Message {
 export default function TradingChat() {
   const positions = useMarketStore((s) => s.positions);
   const candles = useMarketStore((s) => s.candles);
+  const trades = useMarketStore((s) => s.trades);
   const interval = useMarketStore((s) => s.interval);
   const symbol = useMarketStore((s) => s.symbol);
   const lastPrice = candles[candles.length - 1]?.close ?? 0;
@@ -68,6 +69,14 @@ export default function TradingChat() {
         close: c.close,
       }));
 
+      // Get last 100 trades for momentum analysis
+      const last100Trades = trades.slice(0, 100).map(t => ({
+        price: t.price,
+        qty: t.qty,
+        isBuyerMaker: t.isBuyerMaker,
+        time: t.time,
+      }));
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -75,6 +84,7 @@ export default function TradingChat() {
           messages: [{ role: 'user', content: userMessage.content }],
           positions: positionsWithContext,
           candles: last100Candles,
+          trades: last100Trades,
           interval: interval,
           symbol: symbol,
         }),
@@ -102,7 +112,7 @@ export default function TradingChat() {
     } finally {
       setIsLoading(false);
     }
-  }, [positions, lastPrice, candles, interval, symbol]);
+  }, [positions, lastPrice, candles, trades, interval, symbol]);
 
   // Auto-analyze when positions change
   useEffect(() => {
@@ -150,6 +160,14 @@ export default function TradingChat() {
         close: c.close,
       }));
 
+      // Get last 100 trades for momentum analysis
+      const last100Trades = trades.slice(0, 100).map(t => ({
+        price: t.price,
+        qty: t.qty,
+        isBuyerMaker: t.isBuyerMaker,
+        time: t.time,
+      }));
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -159,6 +177,7 @@ export default function TradingChat() {
           ]),
           positions: positionsWithContext,
           candles: last100Candles,
+          trades: last100Trades,
           interval: interval,
           symbol: symbol,
         }),

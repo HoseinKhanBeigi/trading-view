@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, positions, candles, interval, symbol } = await req.json();
+    const { messages, positions, candles, trades, interval, symbol } = await req.json();
 
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
@@ -12,32 +12,39 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Prepare system message with position and candle data context
+    // Prepare system message with position, candle, and trade data context
     let systemMessage = `You are a professional trading assistant specializing in technical analysis. `;
     
     if (candles && candles.length > 0) {
       systemMessage += `Analyze the last ${candles.length} candlestick candles (${interval || '5m'} timeframe) for ${symbol || 'the trading pair'} and perform technical analysis. `;
     }
     
+    if (trades && trades.length > 0) {
+      systemMessage += `Also analyze recent trade data to assess market momentum, buying/selling pressure, and volume patterns. `;
+    }
+    
     if (positions && positions.length > 0) {
       systemMessage += `IMPORTANT: All positions shown are MOCK/SIMULATED positions for testing purposes only. `;
-      systemMessage += `Based on the technical analysis of the candles and the current mock positions, provide entry position recommendations. `;
+      systemMessage += `Based on the technical analysis of the candles, trade momentum, and the current mock positions, provide entry position recommendations. `;
     } else {
-      systemMessage += `Based on the technical analysis of the candles, provide entry position recommendations. `;
+      systemMessage += `Based on the technical analysis of the candles and trade momentum, provide entry position recommendations. `;
     }
     
     systemMessage += `\n\nProvide clear, concise analysis focusing on:\n`;
     systemMessage += `1. Technical indicators and patterns (support/resistance, trend, momentum, etc.)\n`;
-    systemMessage += `2. Entry recommendations (LONG or SHORT) with reasoning\n`;
-    systemMessage += `3. Suggested entry price levels\n`;
-    systemMessage += `4. Risk/reward assessment\n`;
+    if (trades && trades.length > 0) {
+      systemMessage += `2. Market momentum analysis from recent trades (buying vs selling pressure, volume patterns, price action)\n`;
+    }
+    systemMessage += `${trades && trades.length > 0 ? '3' : '2'}. Entry recommendations (LONG or SHORT) with reasoning\n`;
+    systemMessage += `${trades && trades.length > 0 ? '4' : '3'}. Suggested entry price levels\n`;
+    systemMessage += `${trades && trades.length > 0 ? '5' : '4'}. Risk/reward assessment\n`;
     
     if (positions && positions.length > 0) {
-      systemMessage += `5. Comparison with existing mock positions\n`;
-      systemMessage += `6. Suggested actions for existing positions (hold, exit, or adjust)\n`;
+      systemMessage += `${trades && trades.length > 0 ? '6' : '5'}. Comparison with existing mock positions\n`;
+      systemMessage += `${trades && trades.length > 0 ? '7' : '6'}. Suggested actions for existing positions (hold, exit, or adjust)\n`;
     }
     
-    systemMessage += `\nBe professional, data-driven, and focus on technical analysis fundamentals.`;
+    systemMessage += `\nBe professional, data-driven, and focus on technical analysis fundamentals. Use trade data to validate momentum and confirm price movements.`;
     
     // Build the context data for the system message
     let contextData = '';
@@ -54,6 +61,19 @@ export async function POST(req: NextRequest) {
         c.close.toFixed(2)
       ]);
       contextData += JSON.stringify(candlesFormatted, null, 2);
+    }
+    
+    if (trades && trades.length > 0) {
+      contextData += `\n\nRECENT TRADES DATA (Last ${trades.length} trades for momentum analysis):\n`;
+      contextData += `Format: [price, quantity, isBuyerMaker (true=buyer was maker/seller was aggressive, false=seller was maker/buyer was aggressive), time]\n`;
+      contextData += `Note: isBuyerMaker=true indicates selling pressure (aggressive sellers), isBuyerMaker=false indicates buying pressure (aggressive buyers)\n`;
+      const tradesFormatted = trades.map((t: { price: number; qty: number; isBuyerMaker: boolean; time: number }) => [
+        t.price.toFixed(2),
+        t.qty.toFixed(4),
+        t.isBuyerMaker,
+        t.time
+      ]);
+      contextData += JSON.stringify(tradesFormatted, null, 2);
     }
     
     if (positions && positions.length > 0) {
