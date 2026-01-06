@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ColorType, createChart, CandlestickSeries, LineSeries, ISeriesApi, LineStyle } from "lightweight-charts";
+import { ColorType, createChart, CandlestickSeries, LineSeries, ISeriesApi, LineStyle, IPriceLine } from "lightweight-charts";
 import { localTimeFormatter } from "@/utils/time";
 import { startKlines, stopKlines } from "@/store/actions/candles";
 import { useMarketStore } from "@/store";
@@ -9,16 +9,22 @@ import { StatusBadge } from "../StatusBadge";
 import { LatencyBadge } from "../latencyBadge";
 import { ErrorBanner } from "../ErrorBanner";
 import TimeframeButtons from "../Timeframe";
+import { fetchDepthSnapshot } from "@/lib/binance";
+import { fromSnapshot, identifySupportResistance } from "@/lib/orderbook";
+import { detectOrderBlocks, getActiveOrderBlocks, type OrderBlock } from "@/lib/order-blocks";
 
 export default function CandlesChart() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const seededRef = useRef(false);
   const candles = useMarketStore((s) => s.candles);
+  const symbol = useMarketStore((s) => s.symbol);
   const last = candles[candles.length - 1];
   const first = candles[0];
   const lastPrice = last?.close;
   const changePct = last && first ? ((last.close - first.open) / first.open) * 100 : undefined;
+  const priceLinesRef = useRef<IPriceLine[]>([]);
+  const orderBlockLinesRef = useRef<IPriceLine[]>([]);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -44,6 +50,145 @@ export default function CandlesChart() {
     const vwap: ISeriesApi<'Line'> = chart.addSeries(LineSeries, { color: "#3b82f6", lineWidth: 2 });
     const vwapUp: ISeriesApi<'Line'> = chart.addSeries(LineSeries, { color: "#60a5fa", lineStyle: LineStyle.Dotted });
     const vwapDn: ISeriesApi<'Line'> = chart.addSeries(LineSeries, { color: "#60a5fa", lineStyle: LineStyle.Dotted });
+
+    // Function to update support/resistance lines
+    async function updateSupportResistanceLines() {
+      const currentSymbol = useMarketStore.getState().symbol;
+      if (!currentSymbol) return;
+      
+      try {
+        // Remove existing price lines
+        priceLinesRef.current.forEach(line => {
+          try {
+            series.removePriceLine(line);
+          } catch {}
+        });
+        priceLinesRef.current = [];
+
+        // Fetch order book snapshot
+        const snapshot = await fetchDepthSnapshot(currentSymbol, 100);
+        const book = fromSnapshot(snapshot);
+        const supportResistance = identifySupportResistance(book, {
+          minSizePercentile: 70,
+          maxLevels: 10,
+          lookbackLevels: 100,
+        });
+
+        // Add support lines (green, below current price)
+        const topSupport = supportResistance.support.slice(0, 5);
+        topSupport.forEach((level, index) => {
+          const line = series.createPriceLine({
+            price: level.price,
+            color: index === 0 ? '#10b981' : '#34d399', // Stronger support = brighter green
+            lineWidth: index === 0 ? 2 : 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: `Support ${level.price.toFixed(2)} (${level.strength})`,
+          });
+          priceLinesRef.current.push(line);
+        });
+
+        // Add resistance lines (red, above current price)
+        const topResistance = supportResistance.resistance.slice(0, 5);
+        topResistance.forEach((level, index) => {
+          const line = series.createPriceLine({
+            price: level.price,
+            color: index === 0 ? '#ef4444' : '#f87171', // Stronger resistance = brighter red
+            lineWidth: index === 0 ? 2 : 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: `Resistance ${level.price.toFixed(2)} (${level.strength})`,
+          });
+          priceLinesRef.current.push(line);
+        });
+      } catch (error) {
+        console.error('Error updating support/resistance lines:', error);
+      }
+    }
+
+    // Function to update order block lines
+    function updateOrderBlockLines() {
+      if (candles.length < 10) return;
+
+      // Remove existing order block lines
+      orderBlockLinesRef.current.forEach(line => {
+        try {
+          series.removePriceLine(line);
+        } catch {}
+      });
+      orderBlockLinesRef.current = [];
+
+      // Detect order blocks
+      const blocks = detectOrderBlocks(candles, {
+        lookback: 50,
+        minBlockSize: 0.3, // 0.3% minimum block size
+        volumeThreshold: 1.5, // 1.5x average volume
+      });
+
+      const currentPrice = candles[candles.length - 1]?.close || 0;
+      const active = getActiveOrderBlocks(blocks, currentPrice);
+
+      // Add bullish order blocks (support zones) - shown as green zones with high and low lines
+      active.bullish.slice(0, 5).forEach((block: OrderBlock) => {
+        // Low line (main support level)
+        const lowLine = series.createPriceLine({
+          price: block.low,
+          color: block.strength === 'strong' ? '#22c55e' : block.strength === 'medium' ? '#4ade80' : '#86efac',
+          lineWidth: block.strength === 'strong' ? 4 : block.strength === 'medium' ? 3 : 2,
+          lineStyle: LineStyle.Solid,
+          axisLabelVisible: true,
+          title: `OB Support ${block.low.toFixed(2)} (${block.strength})`,
+        });
+        orderBlockLinesRef.current.push(lowLine);
+
+        // High line (top of the block zone)
+        const highLine = series.createPriceLine({
+          price: block.high,
+          color: block.strength === 'strong' ? '#22c55e' : block.strength === 'medium' ? '#4ade80' : '#86efac',
+          lineWidth: block.strength === 'strong' ? 2 : block.strength === 'medium' ? 1 : 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: false,
+        });
+        orderBlockLinesRef.current.push(highLine);
+      });
+
+      // Add bearish order blocks (resistance zones) - shown as red zones with high and low lines
+      active.bearish.slice(0, 5).forEach((block: OrderBlock) => {
+        // High line (main resistance level)
+        const highLine = series.createPriceLine({
+          price: block.high,
+          color: block.strength === 'strong' ? '#dc2626' : block.strength === 'medium' ? '#f87171' : '#fca5a5',
+          lineWidth: block.strength === 'strong' ? 4 : block.strength === 'medium' ? 3 : 2,
+          lineStyle: LineStyle.Solid,
+          axisLabelVisible: true,
+          title: `OB Resistance ${block.high.toFixed(2)} (${block.strength})`,
+        });
+        orderBlockLinesRef.current.push(highLine);
+
+        // Low line (bottom of the block zone)
+        const lowLine = series.createPriceLine({
+          price: block.low,
+          color: block.strength === 'strong' ? '#dc2626' : block.strength === 'medium' ? '#f87171' : '#fca5a5',
+          lineWidth: block.strength === 'strong' ? 2 : block.strength === 'medium' ? 1 : 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: false,
+        });
+        orderBlockLinesRef.current.push(lowLine);
+      });
+    }
+
+    // Initial load and periodic updates
+    updateSupportResistanceLines();
+    const supportResistanceInterval = setInterval(updateSupportResistanceLines, 10000); // Update every 10 seconds
+    
+    // Update order blocks when candles change
+    let lastCandlesLength = candles.length;
+    const unsubCandlesForBlocks = useMarketStore.subscribe((state) => {
+      if (state.candles.length !== lastCandlesLength && state.candles.length > 0) {
+        lastCandlesLength = state.candles.length;
+        updateOrderBlockLines();
+      }
+    });
 
     // initial size + responsive resize
     function resizeToContainer() {
@@ -116,7 +261,21 @@ export default function CandlesChart() {
     window.addEventListener('themechange', onThemeChange as any);
     return () => {
       unsubCandles();
+      unsubCandlesForBlocks();
       stopKlines();
+      clearInterval(supportResistanceInterval);
+      priceLinesRef.current.forEach(line => {
+        try {
+          series.removePriceLine(line);
+        } catch {}
+      });
+      orderBlockLinesRef.current.forEach(line => {
+        try {
+          series.removePriceLine(line);
+        } catch {}
+      });
+      priceLinesRef.current = [];
+      orderBlockLinesRef.current = [];
       chart.remove();
       try { ro.disconnect(); } catch {}
       themeObserver.disconnect();
