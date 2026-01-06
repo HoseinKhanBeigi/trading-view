@@ -150,18 +150,18 @@ export default function OrderBookPanel() {
 
   const display = useMemo(() => (book ? topN(book, 20) : { bids: [], asks: [] }), [book]);
   const heat = useMemo(() => {
-    if (!book) return { bids: { cum: [], max: 0 }, asks: { cum: [], max: 0 } } as any;
+    if (!book) return { bids: { res: [], max: 0 }, asks: { res: [], max: 0 } } as any;
     const bids = topN(book, 20).bids;
     const asks = topN(book, 20).asks;
-    const cumBids: number[] = [];
-    const cumAsks: number[] = [];
+    const resBids: number[] = [];
+    const resAsks: number[] = [];
     let acc = 0;
-    for (const l of bids) { acc += l.size; cumBids.push(acc); }
+    for (const l of bids) { acc += l.size; resBids.push(acc); }
     acc = 0;
-    for (const l of asks) { acc += l.size; cumAsks.push(acc); }
-    const maxB = cumBids[cumBids.length - 1] || 0;
-    const maxA = cumAsks[cumAsks.length - 1] || 0;
-    return { bids: { cum: cumBids, max: maxB }, asks: { cum: cumAsks, max: maxA } };
+    for (const l of asks) { acc += l.size; resAsks.push(acc); }
+    const maxB = resBids[resBids.length - 1] || 0;
+    const maxA = resAsks[resAsks.length - 1] || 0;
+    return { bids: { res: resBids, max: maxB }, asks: { res: resAsks, max: maxA } };
   }, [book]);
   const meta = useMemo(() => (book ? { ...spreadMid(book), vwap: vwapTop20(book) } : null), [book]);
   const supportResistance = useMemo(() => {
@@ -487,7 +487,7 @@ export default function OrderBookPanel() {
             <span className="text-right">Bid Price</span>
           </div>
           {display.bids.map((l, i) => (
-            <Row key={`b-${l.price}`} price={l.price} size={l.size} total={l.size * l.price} side="bid" highlight={updatedPrices.has(l.price)} heatPct={heat.bids.max ? (heat.bids.cum[i] / heat.bids.max) : 0} />
+            <Row key={`b-${l.price}`} price={l.price} size={l.size} total={l.size * l.price} side="bid" highlight={updatedPrices.has(l.price)} heatPct={heat.bids.max ? (heat.bids.res[i] / heat.bids.max) : 0} />
           ))}
         </div>
         <div className="p-2 space-y-1">
@@ -497,7 +497,7 @@ export default function OrderBookPanel() {
             <span className="text-right">Ask Size</span>
           </div>
           {display.asks.map((l, i) => (
-            <Row key={`a-${l.price}`} price={l.price} size={l.size} total={l.size * l.price} side="ask" highlight={updatedPrices.has(l.price)} heatPct={heat.asks.max ? (heat.asks.cum[i] / heat.asks.max) : 0} />
+            <Row key={`a-${l.price}`} price={l.price} size={l.size} total={l.size * l.price} side="ask" highlight={updatedPrices.has(l.price)} heatPct={heat.asks.max ? (heat.asks.res[i] / heat.asks.max) : 0} />
           ))}
         </div>
       </div>
