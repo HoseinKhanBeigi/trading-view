@@ -12,6 +12,7 @@ import TimeframeButtons from "../Timeframe";
 import { fetchDepthSnapshot } from "@/lib/binance";
 import { fromSnapshot, identifySupportResistance } from "@/lib/orderbook";
 import { detectOrderBlocks, getActiveOrderBlocks, type OrderBlock } from "@/lib/order-blocks";
+import { analyzeMirrorPatterns, type PatternAnalysis, type PatternSignal } from "@/lib/mirror-patterns";
 
 export default function CandlesChart() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -19,12 +20,14 @@ export default function CandlesChart() {
   const seededRef = useRef(false);
   const candles = useMarketStore((s) => s.candles);
   const symbol = useMarketStore((s) => s.symbol);
+  const [patternAnalysis, setPatternAnalysis] = useState<PatternAnalysis | null>(null);
   const last = candles[candles.length - 1];
   const first = candles[0];
   const lastPrice = last?.close;
   const changePct = last && first ? ((last.close - first.open) / first.open) * 100 : undefined;
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const orderBlockLinesRef = useRef<IPriceLine[]>([]);
+  const signalLinesRef = useRef<IPriceLine[]>([]);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -50,6 +53,12 @@ export default function CandlesChart() {
     const vwap: ISeriesApi<'Line'> = chart.addSeries(LineSeries, { color: "#3b82f6", lineWidth: 2 });
     const vwapUp: ISeriesApi<'Line'> = chart.addSeries(LineSeries, { color: "#60a5fa", lineStyle: LineStyle.Dotted });
     const vwapDn: ISeriesApi<'Line'> = chart.addSeries(LineSeries, { color: "#60a5fa", lineStyle: LineStyle.Dotted });
+    // Mirrored price line (mirror of close around first candle open)
+    const mirrorSeries: ISeriesApi<'Line'> = chart.addSeries(LineSeries, { 
+      color: "#f97316",
+      lineWidth: 1,
+      lineStyle: LineStyle.Solid,
+    });
 
     // Function to update support/resistance lines
     async function updateSupportResistanceLines() {
@@ -228,6 +237,49 @@ export default function CandlesChart() {
       vwap.setData(avg as any);
       vwapUp.setData(up as any);
       vwapDn.setData(dn as any);
+      
+      // mirrored price series around first candle open
+      if (candles.length > 0) {
+        const baseOpen = candles[0].open;
+        const mirrored = candles.map(c => ({
+          time: c.time as any,
+          value: 2 * baseOpen - c.close,
+        }));
+        mirrorSeries.setData(mirrored as any);
+
+        // Analyze patterns between price and mirror
+        const mirrorValues = mirrored.map(m => m.value);
+        const analysis = analyzeMirrorPatterns(candles, mirrorValues);
+        setPatternAnalysis(analysis);
+
+        // Remove existing signal lines
+        signalLinesRef.current.forEach(line => {
+          try {
+            series.removePriceLine(line);
+          } catch {}
+        });
+        signalLinesRef.current = [];
+
+        // Add price lines for signals (using price lines instead of markers)
+        if (analysis.signals.length > 0) {
+          analysis.signals.forEach((signal: PatternSignal) => {
+            const lineColor = signal.type === 'BUY' 
+              ? signal.strength === 'strong' ? '#10b981' : signal.strength === 'medium' ? '#34d399' : '#86efac'
+              : signal.strength === 'strong' ? '#ef4444' : signal.strength === 'medium' ? '#f87171' : '#fca5a5';
+            
+            const line = series.createPriceLine({
+              price: signal.price,
+              color: lineColor,
+              lineWidth: signal.strength === 'strong' ? 3 : signal.strength === 'medium' ? 2 : 1,
+              lineStyle: LineStyle.Dotted,
+              axisLabelVisible: true,
+              title: `${signal.type} - ${signal.pattern}`,
+            });
+            signalLinesRef.current.push(line);
+          });
+        }
+      }
+
       setLoading(false);
       
     });
@@ -274,8 +326,14 @@ export default function CandlesChart() {
           series.removePriceLine(line);
         } catch {}
       });
+      signalLinesRef.current.forEach(line => {
+        try {
+          series.removePriceLine(line);
+        } catch {}
+      });
       priceLinesRef.current = [];
       orderBlockLinesRef.current = [];
+      signalLinesRef.current = [];
       chart.remove();
       try { ro.disconnect(); } catch {}
       themeObserver.disconnect();
@@ -331,6 +389,32 @@ export default function CandlesChart() {
           <span aria-live="polite" className="truncate">Data: Binance klines (REST seed + WS live)</span>
           <span className="hidden sm:inline">Local time shown on X‑axis</span>
         </footer>
+
+        {/* Pattern Analysis Panel */}
+        {patternAnalysis && patternAnalysis.signals.length > 0 && (
+          <div className="px-3 sm:px-4 py-2 border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="font-semibold dark-mode-text">Patterns:</span>
+              {patternAnalysis.signals.map((signal, idx) => (
+                <span
+                  key={idx}
+                  className={`px-2 py-1 rounded ${
+                    signal.type === 'BUY'
+                      ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400'
+                      : 'bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-400'
+                  }`}
+                  title={signal.reason}
+                >
+                  {signal.type} ({signal.pattern})
+                </span>
+              ))}
+              <span className="ml-auto text-zinc-500 dark:text-zinc-400">
+                Symmetry: {(patternAnalysis.symmetry * 100).toFixed(0)}% | 
+                Trend: {patternAnalysis.trend}
+              </span>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );

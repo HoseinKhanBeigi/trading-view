@@ -22,7 +22,19 @@ export function SymbolsList({ className = '' }: SymbolsListProps) {
         <h2 className="text-sm font-semibold dark-mode-text">Markets</h2>
       </div>
       <div className="divide-y dark-mode-border">
-        {['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','TONUSDT','TRXUSDT','DOTUSDT'].map((s) => {
+        {[
+          'BTCUSDT',
+          'ETHUSDT',
+          'BNBUSDT',
+          'SOLUSDT',
+          'XRPUSDT',
+          'ADAUSDT',
+          'DOGEUSDT',
+          'TONUSDT',
+          'TRXUSDT',
+          'DOTUSDT',
+          'PAXGUSDT',
+        ].map((s) => {
           const isActive = symbol.toUpperCase() === s.toUpperCase();
           return (
             <button

@@ -7,7 +7,7 @@ export default function TimeframeButtons() {
   const interval = useMarketStore((s) => s.interval);
   const setIntervalVal = useMarketStore((s) => s.setInterval);
   const symbol = useMarketStore((s) => s.symbol);
-  const frames = ["1m","3m","5m","15m","30m","1h","4h","1d"];
+  const frames = ["1m","3m","5m","15m","30m","1h","4h","1d","1w"];
 
   function apply(next: string) {
     if (next === interval) return;
