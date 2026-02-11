@@ -8,6 +8,7 @@ import FuturesTicket from "@/components/FuturesTicket";
 import PositionsPanel from "@/components/PositionsPanel";
 import OrdersTable from "@/components/OrdersTable";
 import TradingChat from "@/components/TradingChat";
+import QuantPanel from "@/components/QuantPanel";
 import { useMarketStore } from "@/store";
 import { useParams } from "next/navigation";
 import { startKlines, stopKlines } from "@/store/actions/candles";
@@ -33,6 +34,7 @@ export default function SymbolPage() {
         </div>
         <div className="xl:col-span-6 space-y-6">
           <CandlesChart />
+          <QuantPanel />
           <OrderTicket />
           <FuturesTicket />
           <OrdersTable />
