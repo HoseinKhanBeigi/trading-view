@@ -12,8 +12,15 @@ import {
   type SignalHistoryEntry,
   type PendingSetup,
   type UnifiedSignal,
+  type PropFirmId,
+  type ChallengePhase,
+  type PropComplianceRule,
+  type PropCompliance,
   DEFAULT_ADVANCED_CONFIG,
+  PROP_FIRM_PRESETS,
+  getPropPreset,
 } from "@/lib/advanced-strategy";
+import type { ShadowPattern, ShadowClusterZone, StopHuntEvent, ShadowAnalysisResult } from "@/lib/shadow-analysis";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -111,7 +118,7 @@ export default function ScalpDashboard() {
   const [showConfig, setShowConfig] = useState(false);
   const [showChecklist, setShowChecklist] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [activeTab, setActiveTab] = useState<'signal' | 'flow' | 'liquidity' | 'structure' | 'risk'>('signal');
+  const [activeTab, setActiveTab] = useState<'signal' | 'flow' | 'liquidity' | 'structure' | 'risk' | 'shadows' | 'prop'>('signal');
   const lastUpdateRef = useRef(0);
   const lastSignalDirRef = useRef<string>('WAIT');
 
@@ -218,6 +225,19 @@ export default function ScalpDashboard() {
           </span>
           )}
 
+          {/* Prop firm badge */}
+          {config.propFirmMode && liveRisk?.propCompliance && (
+            <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${
+              liveRisk.propCompliance.overallStatus === 'compliant'
+                ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400'
+                : liveRisk.propCompliance.overallStatus === 'warning'
+                ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400'
+                : 'bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400'
+            }`}>
+              🏦 {getPropPreset(config.propFirmId)?.name ?? 'Prop'} • {config.propPhase}
+            </span>
+          )}
+
           {/* Trade counter */}
           <span className={`text-[10px] px-2 py-0.5 rounded font-bold ml-auto ${
             dailyStats.total >= config.maxTradesPerDay
@@ -257,6 +277,85 @@ export default function ScalpDashboard() {
             </div>
             ))}
           </div>
+          {/* Prop Firm Config */}
+          <div className="mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-700">
+            <div className="text-[9px] font-semibold uppercase tracking-wide text-violet-400 mb-2">🏦 Prop Firm Mode</div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div>
+                <label className="text-[9px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500 block mb-1">Firm</label>
+                <select
+                  value={config.propFirmId}
+                  onChange={e => {
+                    const id = e.target.value as PropFirmId;
+                    const preset = getPropPreset(id);
+                    setConfig(c => ({
+                      ...c,
+                      propFirmId: id,
+                      propFirmMode: id !== 'none',
+                      propAccountSize: preset?.accountSizes[2] ?? c.capital,
+                      maxDailyLoss: preset?.phases[c.propPhase]?.maxDailyLoss ?? c.maxDailyLoss,
+                      maxDrawdown: preset?.phases[c.propPhase]?.maxTotalDrawdown ?? c.maxDrawdown,
+                      leverage: Math.min(c.leverage, preset?.phases[c.propPhase]?.maxLeverage ?? 100),
+                      propStartDate: c.propStartDate || Date.now(),
+                    }));
+                  }}
+                  className="w-full px-2 py-1.5 rounded text-xs font-mono bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 dark-mode-text"
+                >
+                  <option value="none">None (Custom)</option>
+                  {PROP_FIRM_PRESETS.map(p => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+              {config.propFirmMode && (
+                <>
+                  <div>
+                    <label className="text-[9px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500 block mb-1">Phase</label>
+                    <select
+                      value={config.propPhase}
+                      onChange={e => {
+                        const phase = e.target.value as ChallengePhase;
+                        const preset = getPropPreset(config.propFirmId);
+                        setConfig(c => ({
+                          ...c,
+                          propPhase: phase,
+                          maxDailyLoss: preset?.phases[phase]?.maxDailyLoss ?? c.maxDailyLoss,
+                          maxDrawdown: preset?.phases[phase]?.maxTotalDrawdown ?? c.maxDrawdown,
+                        }));
+                      }}
+                      className="w-full px-2 py-1.5 rounded text-xs font-mono bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 dark-mode-text"
+                    >
+                      <option value="challenge">Challenge</option>
+                      <option value="verification">Verification</option>
+                      <option value="funded">Funded</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[9px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500 block mb-1">Account Size</label>
+                    <select
+                      value={config.propAccountSize}
+                      onChange={e => setConfig(c => ({ ...c, propAccountSize: Number(e.target.value), capital: Number(e.target.value) }))}
+                      className="w-full px-2 py-1.5 rounded text-xs font-mono bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 dark-mode-text"
+                    >
+                      {(getPropPreset(config.propFirmId)?.accountSizes ?? []).map(s => (
+                        <option key={s} value={s}>${s.toLocaleString()}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[9px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500 block mb-1">Start Date</label>
+                    <input
+                      type="date"
+                      value={config.propStartDate ? new Date(config.propStartDate).toISOString().slice(0, 10) : ''}
+                      onChange={e => setConfig(c => ({ ...c, propStartDate: new Date(e.target.value).getTime() }))}
+                      className="w-full px-2 py-1.5 rounded text-xs font-mono bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 dark-mode-text"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
           <div className="flex gap-2 mt-2">
             <button onClick={resetDay} className="text-[10px] px-2 py-1 rounded bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400 hover:bg-rose-200 dark:hover:bg-rose-900/50 transition-colors">
               🗑 Reset Day
@@ -316,6 +415,8 @@ export default function ScalpDashboard() {
           { id: 'liquidity' as const, label: '💧 Liquidity', emoji: '' },
           { id: 'structure' as const, label: '🏗 Structure', emoji: '' },
           { id: 'risk' as const, label: '🛡 Risk', emoji: '' },
+          { id: 'shadows' as const, label: '🕯 Shadows', emoji: '' },
+          { id: 'prop' as const, label: '🏦 Prop', emoji: '' },
         ].map(tab => (
           <button
             key={tab.id}
@@ -1067,8 +1168,496 @@ export default function ScalpDashboard() {
         </div>
       )}
 
+        {/* ── SHADOWS TAB ── */}
+        {activeTab === 'shadows' && r && (
+          <div className="space-y-3">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-2">🕯 Shadow / Wick Analysis</div>
+
+            {/* ▓▓ SHADOW BIAS BANNER ▓▓ */}
+            <div className={`rounded-xl p-3 text-center ${
+              r.shadows.bias === 'bullish'
+                ? 'bg-gradient-to-r from-emerald-950/60 to-emerald-900/30 ring-1 ring-emerald-500/40'
+                : r.shadows.bias === 'bearish'
+                ? 'bg-gradient-to-r from-rose-950/60 to-rose-900/30 ring-1 ring-rose-500/40'
+                : 'bg-gradient-to-r from-zinc-900/60 to-zinc-800/30 ring-1 ring-zinc-700/40'
+            }`}>
+              <div className="text-[10px] font-bold tracking-wider uppercase mb-1 text-zinc-400">
+                Shadow Bias
+              </div>
+              <div className={`text-sm font-black ${
+                r.shadows.bias === 'bullish' ? 'text-emerald-400' : r.shadows.bias === 'bearish' ? 'text-rose-400' : 'text-zinc-300'
+              }`}>
+                {r.shadows.bias === 'bullish' ? '🟢 BULLISH REJECTION' : r.shadows.bias === 'bearish' ? '🔴 BEARISH REJECTION' : '⚪ NEUTRAL'}
+              </div>
+              <div className="text-[9px] text-zinc-500 mt-1">{r.shadows.summary}</div>
+            </div>
+
+            {/* ▓▓ SHADOW STATS ▓▓ */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="rounded-lg bg-zinc-50 dark:bg-zinc-800/40 p-2 text-center">
+                <div className="text-[8px] text-zinc-500 uppercase">Avg Upper Wick</div>
+                <div className="font-mono font-bold text-sm text-rose-400">{r.shadows.avgUpperWickPct.toFixed(1)}%</div>
+              </div>
+              <div className="rounded-lg bg-zinc-50 dark:bg-zinc-800/40 p-2 text-center">
+                <div className="text-[8px] text-zinc-500 uppercase">Avg Lower Wick</div>
+                <div className="font-mono font-bold text-sm text-emerald-400">{r.shadows.avgLowerWickPct.toFixed(1)}%</div>
+              </div>
+              <div className="rounded-lg bg-zinc-50 dark:bg-zinc-800/40 p-2 text-center">
+                <div className="text-[8px] text-zinc-500 uppercase">Shadow Ratio</div>
+                <div className="font-mono font-bold text-sm dark-mode-text">{r.shadows.avgShadowRatio.toFixed(2)}x</div>
+                <div className="text-[7px] text-zinc-500">wick / body</div>
+              </div>
+              <div className="rounded-lg bg-zinc-50 dark:bg-zinc-800/40 p-2 text-center">
+                <div className="text-[8px] text-zinc-500 uppercase">Wick Dominance</div>
+                <div className={`font-bold text-sm ${
+                  r.shadows.wickDominance === 'lower' ? 'text-emerald-400'
+                  : r.shadows.wickDominance === 'upper' ? 'text-rose-400'
+                  : 'text-zinc-400'
+                }`}>
+                  {r.shadows.wickDominance === 'lower' ? '⬇️ Lower' : r.shadows.wickDominance === 'upper' ? '⬆️ Upper' : '⚖️ Balanced'}
+                </div>
+              </div>
+            </div>
+
+            {/* ▓▓ RECENT SHADOW PATTERNS ▓▓ */}
+            {r.shadows.patterns.length > 0 && (
+              <div className="rounded-xl bg-zinc-900/30 p-2.5">
+                <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                  🕯 Shadow Patterns ({r.shadows.patterns.length})
+                </div>
+                <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                  {r.shadows.patterns.slice(0, 10).map((pat, i) => (
+                    <div key={i} className={`rounded-lg p-2 ${
+                      pat.direction === 'bullish' ? 'bg-emerald-900/15 ring-1 ring-emerald-800/30'
+                      : pat.direction === 'bearish' ? 'bg-rose-900/15 ring-1 ring-rose-800/30'
+                      : 'bg-zinc-800/30 ring-1 ring-zinc-700/20'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span className="text-[10px]">
+                          {pat.direction === 'bullish' ? '🟢' : pat.direction === 'bearish' ? '🔴' : '⚪'}
+                        </span>
+                        <span className={`text-[10px] font-black ${
+                          pat.direction === 'bullish' ? 'text-emerald-400'
+                          : pat.direction === 'bearish' ? 'text-rose-400'
+                          : 'text-zinc-300'
+                        }`}>
+                          {pat.type.replace(/-/g, ' ').toUpperCase()}
+                        </span>
+                        <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-zinc-800/50 text-zinc-300 font-bold">
+                          {pat.strength.toFixed(0)}%
+                        </span>
+                        <span className="ml-auto text-[8px] text-zinc-500">
+                          wick: {pat.wickPct.toFixed(0)}% ATR
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 text-[9px]">
+                        <span className="text-zinc-400">Price: <span className="font-mono dark-mode-text">{formatPrice(pat.price)}</span></span>
+                        <span className="text-zinc-500">→</span>
+                        <span className="text-zinc-400">Rejection: <span className="font-mono dark-mode-text">{formatPrice(pat.rejectionPrice)}</span></span>
+                      </div>
+                      <div className="text-[8px] text-zinc-500 mt-0.5">{pat.description}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ▓▓ STOP HUNT EVENTS ▓▓ */}
+            {r.shadows.stopHunts.length > 0 && (
+              <div className="rounded-xl bg-amber-900/10 ring-1 ring-amber-800/30 p-2.5">
+                <div className="text-[8px] uppercase font-bold tracking-wider text-amber-400 mb-2">
+                  🎯 Stop Hunt Detection ({r.shadows.stopHunts.length})
+                </div>
+                <div className="space-y-1.5">
+                  {r.shadows.stopHunts.slice(0, 5).map((hunt, i) => (
+                    <div key={i} className={`rounded-lg p-2 ${
+                      hunt.type === 'long'
+                        ? 'bg-emerald-900/15 ring-1 ring-emerald-800/25'
+                        : 'bg-rose-900/15 ring-1 ring-rose-800/25'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span className="text-[10px]">{hunt.type === 'long' ? '⬇️🟢' : '⬆️🔴'}</span>
+                        <span className={`text-[10px] font-bold ${
+                          hunt.type === 'long' ? 'text-emerald-400' : 'text-rose-400'
+                        }`}>
+                          {hunt.type === 'long' ? 'LONG STOP HUNT' : 'SHORT STOP HUNT'}
+                        </span>
+                        <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-zinc-800/50 text-zinc-300 font-bold">
+                          {hunt.strength.toFixed(0)}%
+                        </span>
+                        <span className={`ml-auto text-[8px] font-bold ${hunt.recovered ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {hunt.recovered ? '✅ Recovered' : '❌ Not recovered'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-1 text-[8px] mt-1">
+                        <div className="text-center">
+                          <div className="text-zinc-500">Level Hunted</div>
+                          <div className="font-mono font-bold dark-mode-text">{formatPrice(hunt.levelHunted)}</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-zinc-500">Wick Extreme</div>
+                          <div className="font-mono font-bold text-amber-400">
+                            {formatPrice(hunt.type === 'long' ? hunt.wickLow : hunt.wickHigh)}
+                          </div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-zinc-500">Recovery</div>
+                          <div className="font-mono font-bold dark-mode-text">{formatPrice(hunt.recoveryPrice)}</div>
+                        </div>
+                      </div>
+                      <div className="text-[7px] text-zinc-500 mt-1">{hunt.description}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ▓▓ SHADOW CLUSTER ZONES (Hidden S/R) ▓▓ */}
+            {r.shadows.clusterZones.length > 0 && (
+              <div className="rounded-xl bg-zinc-900/30 p-2.5">
+                <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                  📍 Wick Cluster Zones — Hidden S/R ({r.shadows.clusterZones.length})
+                </div>
+                <div className="space-y-1">
+                  {r.shadows.clusterZones.slice(0, 8).map((zone, i) => (
+                    <div key={i} className="flex items-center gap-2 text-[9px]">
+                      <span className={`w-2 h-2 rounded-full ${zone.type === 'support' ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+                      <span className={`font-bold text-[9px] w-14 ${zone.type === 'support' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {zone.type === 'support' ? 'SUP' : 'RES'}
+                      </span>
+                      <span className="font-mono dark-mode-text w-20">
+                        {formatPrice(zone.priceLow)}–{formatPrice(zone.priceHigh)}
+                      </span>
+                      <span className="text-zinc-500">
+                        {zone.wickCount} wicks
+                      </span>
+                      <div className="flex-1 h-1.5 bg-zinc-800/60 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${zone.type === 'support' ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                          style={{ width: `${zone.strength}%` }}
+                        />
+                      </div>
+                      <span className="text-[8px] text-zinc-500 w-8 text-right">{zone.strength.toFixed(0)}%</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ▓▓ LAST 10 CANDLES SHADOW VISUALIZATION ▓▓ */}
+            <div className="rounded-xl bg-zinc-900/30 p-2.5">
+              <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                📊 Recent Candle Shadows (Last 10)
+              </div>
+              <div className="flex gap-1 items-end justify-center" style={{ height: 80 }}>
+                {r.shadows.recentMetrics.slice(-10).map((m, i) => {
+                  const maxRange = Math.max(...r.shadows.recentMetrics.slice(-10).map(rm => rm.totalRange)) || 1;
+                  const scale = 70 / maxRange;
+                  const uwH = m.upperWick * scale;
+                  const bodyH = Math.max(2, m.body * scale);
+                  const lwH = m.lowerWick * scale;
+                  return (
+                    <div key={i} className="flex flex-col items-center flex-1 min-w-0" title={`UW:${m.upperWickPct.toFixed(0)}% B:${m.bodyPct.toFixed(0)}% LW:${m.lowerWickPct.toFixed(0)}%`}>
+                      {/* Upper wick */}
+                      <div className="w-px bg-zinc-500" style={{ height: `${uwH}px` }} />
+                      {/* Body */}
+                      <div
+                        className={`w-3 rounded-sm ${m.isBullish ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                        style={{ height: `${bodyH}px` }}
+                      />
+                      {/* Lower wick */}
+                      <div className="w-px bg-zinc-500" style={{ height: `${lwH}px` }} />
+                      {/* Labels */}
+                      <div className="text-[6px] text-zinc-600 mt-0.5 whitespace-nowrap">
+                        {m.upperWickPct > 40 ? '⬆' : m.lowerWickPct > 40 ? '⬇' : '·'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex justify-between text-[7px] text-zinc-600 mt-1">
+                <span>← Older</span>
+                <span>⬆=Upper wick dominant ⬇=Lower wick dominant</span>
+                <span>Newer →</span>
+              </div>
+            </div>
+
+            <ScoreBar value={r.shadows.score} label="Shadow Score" />
+          </div>
+        )}
+
+        {/* ── PROP FIRM TAB ── */}
+        {activeTab === 'prop' && (
+          <div className="space-y-3">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-2">🏦 Prop Firm Dashboard</div>
+
+            {!config.propFirmMode ? (
+              <div className="text-center py-8">
+                <div className="text-3xl mb-3">🏦</div>
+                <div className="text-sm font-semibold dark-mode-text mb-1">Prop Trading Mode Disabled</div>
+                <div className="text-[11px] text-zinc-500 mb-4 max-w-xs mx-auto">
+                  Enable Prop Firm Mode in settings (⚙️) to track compliance with prop firm rules like FTMO, Topstep, Apex, etc.
+                </div>
+                <button
+                  onClick={() => { setShowConfig(true); setConfig(c => ({ ...c, propFirmMode: true, propFirmId: 'ftmo', propAccountSize: 100000, capital: 100000, propStartDate: Date.now() })); }}
+                  className="px-4 py-2 rounded-lg text-xs font-bold bg-violet-600 hover:bg-violet-700 text-white transition-colors"
+                >
+                  🚀 Quick Start with FTMO $100K
+                </button>
+              </div>
+            ) : liveRisk?.propCompliance ? (
+              <>
+                {/* ▓▓ ACCOUNT HEALTH ▓▓ */}
+                <div className={`rounded-xl p-3 text-center ${
+                  liveRisk.propCompliance.overallStatus === 'compliant'
+                    ? 'bg-gradient-to-r from-emerald-950/60 to-emerald-900/30 ring-1 ring-emerald-500/40'
+                    : liveRisk.propCompliance.overallStatus === 'warning'
+                    ? 'bg-gradient-to-r from-amber-950/60 to-amber-900/30 ring-1 ring-amber-500/40'
+                    : 'bg-gradient-to-r from-rose-950/60 to-rose-900/30 ring-1 ring-rose-500/40'
+                }`}>
+                  <div className="text-[10px] font-bold tracking-wider uppercase mb-1 text-zinc-400">
+                    {getPropPreset(config.propFirmId)?.name ?? 'Prop Firm'} — {config.propPhase.toUpperCase()}
+                  </div>
+                  <div className={`text-2xl font-black ${
+                    liveRisk.propCompliance.overallStatus === 'compliant' ? 'text-emerald-400'
+                    : liveRisk.propCompliance.overallStatus === 'warning' ? 'text-amber-400'
+                    : 'text-rose-400'
+                  }`}>
+                    {liveRisk.propCompliance.overallStatus === 'compliant' ? '✅ COMPLIANT'
+                    : liveRisk.propCompliance.overallStatus === 'warning' ? '⚠️ WARNING'
+                    : '⛔ VIOLATED'}
+                  </div>
+                  <div className="text-[9px] text-zinc-500 mt-1">
+                    Account: ${config.propAccountSize.toLocaleString()} • Health: {liveRisk.propCompliance.accountHealth.toFixed(0)}%
+                  </div>
+                </div>
+
+                {/* ▓▓ ACCOUNT HEALTH BAR ▓▓ */}
+                <div className="rounded-xl bg-zinc-900/30 p-2.5">
+                  <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">Account Health</div>
+                  <div className="h-3 bg-zinc-800/60 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all ${
+                        liveRisk.propCompliance.accountHealth > 70 ? 'bg-emerald-500'
+                        : liveRisk.propCompliance.accountHealth > 40 ? 'bg-amber-500'
+                        : 'bg-rose-500'
+                      }`}
+                      style={{ width: `${liveRisk.propCompliance.accountHealth}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[8px] text-zinc-500 mt-1">
+                    <span>Danger</span>
+                    <span className="font-bold dark-mode-text">{liveRisk.propCompliance.accountHealth.toFixed(0)}%</span>
+                    <span>Safe</span>
+                  </div>
+                </div>
+
+                {/* ▓▓ PROFIT TARGET PROGRESS ▓▓ */}
+                {liveRisk.propCompliance.profitTargetPct > 0 && (
+                  <div className="rounded-xl bg-zinc-900/30 p-2.5">
+                    <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                      🎯 Profit Target — {liveRisk.propCompliance.currentProfitPct.toFixed(2)}% / {liveRisk.propCompliance.profitTargetPct}%
+                    </div>
+                    <div className="h-4 bg-zinc-800/60 rounded-full overflow-hidden relative">
+                      <div
+                        className={`h-full rounded-full transition-all ${
+                          liveRisk.propCompliance.progressToTarget >= 100 ? 'bg-emerald-500' : 'bg-violet-500'
+                        }`}
+                        style={{ width: `${Math.min(100, liveRisk.propCompliance.progressToTarget)}%` }}
+                      />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <span className="text-[9px] font-bold text-white drop-shadow">
+                          {liveRisk.propCompliance.progressToTarget.toFixed(1)}%
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex justify-between text-[9px] mt-1.5">
+                      <span className="text-zinc-400">
+                        Current: <span className={`font-bold ${liveRisk.propCompliance.currentProfitPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {liveRisk.propCompliance.currentProfitPct >= 0 ? '+' : ''}{liveRisk.propCompliance.currentProfitPct.toFixed(2)}%
+                        </span>
+                      </span>
+                      <span className="text-zinc-400">
+                        Target: <span className="font-bold text-violet-400">${liveRisk.propCompliance.profitTarget.toLocaleString()}</span>
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* ▓▓ KEY METRICS GRID ▓▓ */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="rounded-lg bg-zinc-50 dark:bg-zinc-800/40 p-2 text-center">
+                    <div className="text-[8px] text-zinc-500 uppercase">Days Traded</div>
+                    <div className="font-mono font-bold text-sm dark-mode-text">
+                      {liveRisk.propCompliance.daysTraded}
+                      {liveRisk.propCompliance.minDaysRequired > 0 && (
+                        <span className="text-[9px] text-zinc-500">/{liveRisk.propCompliance.minDaysRequired}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-zinc-50 dark:bg-zinc-800/40 p-2 text-center">
+                    <div className="text-[8px] text-zinc-500 uppercase">Days Left</div>
+                    <div className={`font-mono font-bold text-sm ${
+                      liveRisk.propCompliance.daysRemaining === -1 ? 'text-emerald-400'
+                      : liveRisk.propCompliance.daysRemaining < 5 ? 'text-rose-400'
+                      : 'dark-mode-text'
+                    }`}>
+                      {liveRisk.propCompliance.daysRemaining === -1 ? '∞' : liveRisk.propCompliance.daysRemaining}
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-zinc-50 dark:bg-zinc-800/40 p-2 text-center">
+                    <div className="text-[8px] text-zinc-500 uppercase">Consistency</div>
+                    <div className={`font-mono font-bold text-sm ${
+                      liveRisk.propCompliance.consistencyScore > 70 ? 'text-emerald-400'
+                      : liveRisk.propCompliance.consistencyScore > 40 ? 'text-amber-400'
+                      : 'text-rose-400'
+                    }`}>
+                      {liveRisk.propCompliance.consistencyScore.toFixed(0)}%
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-zinc-50 dark:bg-zinc-800/40 p-2 text-center">
+                    <div className="text-[8px] text-zinc-500 uppercase">
+                      {liveRisk.propCompliance.profitSplit > 0 ? 'Est. Payout' : 'Profit Split'}
+                    </div>
+                    <div className="font-mono font-bold text-sm text-emerald-400">
+                      {liveRisk.propCompliance.profitSplit > 0
+                        ? `$${liveRisk.propCompliance.estimatedPayout.toFixed(0)}`
+                        : `${liveRisk.propCompliance.profitSplit}%`
+                      }
+                    </div>
+                    {liveRisk.propCompliance.profitSplit > 0 && (
+                      <div className="text-[7px] text-zinc-500">{liveRisk.propCompliance.profitSplit}% split</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ▓▓ DRAWDOWN VISUALIZATION ▓▓ */}
+                <div className="rounded-xl bg-zinc-900/30 p-2.5">
+                  <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                    {liveRisk.propCompliance.trailingDrawdownPct > 0 ? '📉 Trailing' : '📉'} Drawdown
+                  </div>
+                  <div className="flex items-end gap-2 mb-2">
+                    <div className={`text-2xl font-black ${
+                      liveRisk.propCompliance.trailingDrawdownPct > (getPropPreset(config.propFirmId)?.phases[config.propPhase]?.maxTotalDrawdown ?? 10) * 0.7 ? 'text-rose-400'
+                      : liveRisk.propCompliance.trailingDrawdownPct > (getPropPreset(config.propFirmId)?.phases[config.propPhase]?.maxTotalDrawdown ?? 10) * 0.4 ? 'text-amber-400'
+                      : 'text-emerald-400'
+                    }`}>
+                      {liveRisk.propCompliance.trailingDrawdownPct.toFixed(2)}%
+                    </div>
+                    <div className="text-[9px] text-zinc-500 mb-1">
+                      / {getPropPreset(config.propFirmId)?.phases[config.propPhase]?.maxTotalDrawdown ?? config.maxDrawdown}% max
+                    </div>
+                  </div>
+                  <div className="h-2 bg-zinc-800/60 rounded-full overflow-hidden">
+                    {(() => {
+                      const maxDD = getPropPreset(config.propFirmId)?.phases[config.propPhase]?.maxTotalDrawdown ?? config.maxDrawdown;
+                      const pctFilled = maxDD > 0 ? Math.min(100, (liveRisk.propCompliance.trailingDrawdownPct / maxDD) * 100) : 0;
+                      return (
+                        <div
+                          className={`h-full rounded-full transition-all ${
+                            pctFilled > 75 ? 'bg-rose-500' : pctFilled > 50 ? 'bg-amber-500' : 'bg-emerald-500'
+                          }`}
+                          style={{ width: `${pctFilled}%` }}
+                        />
+                      );
+                    })()}
+                  </div>
+                  <div className="text-[8px] text-zinc-500 mt-1">
+                    High water mark: ${liveRisk.propCompliance.trailingDrawdownLevel.toLocaleString()}
+                  </div>
+                </div>
+
+                {/* ▓▓ COMPLIANCE RULES ▓▓ */}
+                <div className="rounded-xl bg-zinc-900/30 p-2.5">
+                  <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">📋 Rule Compliance</div>
+                  <div className="space-y-1.5">
+                    {liveRisk.propCompliance.rules.map((rule) => (
+                      <div key={rule.id} className="rounded-lg bg-zinc-800/30 p-2">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-[10px]">
+                            {rule.severity === 'ok' ? '✅' : rule.severity === 'warning' ? '⚠️' : rule.severity === 'danger' ? '🔶' : '⛔'}
+                          </span>
+                          <span className="text-[10px] font-semibold dark-mode-text flex-1">{rule.label}</span>
+                          <span className={`text-[9px] font-mono font-bold ${
+                            rule.severity === 'ok' ? 'text-emerald-400'
+                            : rule.severity === 'warning' ? 'text-amber-400'
+                            : 'text-rose-400'
+                          }`}>
+                            {rule.current}
+                          </span>
+                          <span className="text-[8px] text-zinc-500">/ {rule.limit}</span>
+                        </div>
+                        <div className="h-1.5 bg-zinc-700/40 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              rule.severity === 'ok' ? 'bg-emerald-500'
+                              : rule.severity === 'warning' ? 'bg-amber-500'
+                              : 'bg-rose-500'
+                            }`}
+                            style={{ width: `${rule.pctUsed}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* ▓▓ PROP TIPS ▓▓ */}
+                <div className="rounded-xl bg-violet-900/10 ring-1 ring-violet-800/30 p-2.5">
+                  <div className="text-[8px] uppercase font-bold tracking-wider text-violet-400 mb-2">💡 Prop Trading Tips</div>
+                  <div className="space-y-1 text-[9px] text-zinc-400">
+                    {liveRisk.propCompliance.trailingDrawdownPct > (getPropPreset(config.propFirmId)?.phases[config.propPhase]?.maxTotalDrawdown ?? 10) * 0.5 && (
+                      <div className="flex items-start gap-1.5">
+                        <span className="text-rose-400">⚠</span>
+                        <span>Drawdown over 50% of limit. <span className="text-rose-400 font-bold">Reduce position sizes immediately.</span></span>
+                      </div>
+                    )}
+                    {liveRisk.propCompliance.maxSingleTradePct > 25 && (
+                      <div className="flex items-start gap-1.5">
+                        <span className="text-amber-400">⚠</span>
+                        <span>Largest single trade is {liveRisk.propCompliance.maxSingleTradePct.toFixed(0)}% of total profit. <span className="text-amber-400 font-bold">Aim for smaller, consistent wins.</span></span>
+                      </div>
+                    )}
+                    {liveRisk.propCompliance.daysTraded < liveRisk.propCompliance.minDaysRequired && (
+                      <div className="flex items-start gap-1.5">
+                        <span className="text-violet-400">ℹ</span>
+                        <span>Need {liveRisk.propCompliance.minDaysRequired - liveRisk.propCompliance.daysTraded} more trading days to pass.</span>
+                      </div>
+                    )}
+                    {liveRisk.propCompliance.progressToTarget >= 100 && liveRisk.propCompliance.daysTraded >= liveRisk.propCompliance.minDaysRequired && (
+                      <div className="flex items-start gap-1.5">
+                        <span className="text-emerald-400">🎉</span>
+                        <span className="text-emerald-400 font-bold">All targets met! You may be eligible to pass this phase.</span>
+                      </div>
+                    )}
+                    <div className="flex items-start gap-1.5">
+                      <span className="text-zinc-500">📌</span>
+                      <span>Risk max 1% per trade in prop accounts. Consistency beats big wins.</span>
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="text-center py-6">
+                <div className="text-2xl mb-2">📊</div>
+                <div className="text-sm text-zinc-500">Calculating prop compliance...</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Shadows tab no data */}
+        {activeTab === 'shadows' && !r && (
+          <div className="text-center py-6">
+            <div className="text-2xl mb-2">🕯</div>
+            <div className="text-sm text-zinc-500">
+              {candles.length < 50 ? `Loading... (${candles.length}/50 candles)` : 'Analyzing shadows...'}
+            </div>
+          </div>
+        )}
+
         {/* No data state for non-signal tabs */}
-        {activeTab !== 'signal' && !r && (
+        {activeTab !== 'signal' && activeTab !== 'prop' && activeTab !== 'shadows' && !r && (
           <div className="text-center py-6">
             <div className="text-2xl mb-2">📊</div>
             <div className="text-sm text-zinc-400 dark:text-zinc-500">
@@ -1088,6 +1677,18 @@ export default function ScalpDashboard() {
           <span className={`${liveRisk.heatIndex > 50 ? 'text-amber-400' : 'text-emerald-400'}`}>
             🌡 Heat: <strong>{liveRisk.heatIndex.toFixed(0)}</strong>
         </span>
+        )}
+        {config.propFirmMode && liveRisk?.propCompliance && (
+          <span className={`${
+            liveRisk.propCompliance.accountHealth > 70 ? 'text-emerald-400'
+            : liveRisk.propCompliance.accountHealth > 40 ? 'text-amber-400'
+            : 'text-rose-400'
+          }`}>
+            🏦 <strong>{liveRisk.propCompliance.accountHealth.toFixed(0)}%</strong>
+            {liveRisk.propCompliance.profitTargetPct > 0 && (
+              <> · {liveRisk.propCompliance.progressToTarget.toFixed(0)}% to target</>
+            )}
+          </span>
         )}
         <span className="ml-auto">{new Date().toLocaleTimeString()}</span>
       </div>

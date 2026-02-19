@@ -13,6 +13,13 @@ import {
 import { detectOrderBlocks, getActiveOrderBlocks, type OrderBlock } from "./order-blocks";
 import type { OrderBook, BookLevel } from "./orderbook";
 import { identifySupportResistance, type SupportResistanceLevel } from "./orderbook";
+import {
+  analyzeShadows,
+  type ShadowAnalysisResult,
+  type ShadowPattern,
+  type ShadowClusterZone,
+  type StopHuntEvent,
+} from "./shadow-analysis";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -154,6 +161,36 @@ export type ChecklistItem = {
 
 // ─── Risk Management ─────────────────────────────────────────────────────────
 
+export type PropComplianceRule = {
+  id: string;
+  label: string;
+  passed: boolean;
+  current: string;
+  limit: string;
+  severity: 'ok' | 'warning' | 'danger' | 'violated';
+  pctUsed: number;                    // 0-100, how close to limit
+};
+
+export type PropCompliance = {
+  rules: PropComplianceRule[];
+  overallStatus: 'compliant' | 'warning' | 'violated';
+  profitTarget: number;              // $ amount to reach
+  profitTargetPct: number;           // % target
+  currentProfitPct: number;          // current % toward target
+  progressToTarget: number;          // 0-100%
+  trailingDrawdownLevel: number;     // trailing DD high water mark $
+  trailingDrawdownPct: number;       // current trailing DD %
+  daysTraded: number;
+  minDaysRequired: number;
+  maxDaysAllowed: number;            // 0 = unlimited
+  daysRemaining: number;             // -1 = unlimited
+  consistencyScore: number;          // 0-100 (100 = perfectly consistent)
+  maxSingleTradePct: number;         // largest single trade as % of total profit
+  profitSplit: number;               // % trader keeps
+  estimatedPayout: number;           // $ estimated payout at current profit
+  accountHealth: number;             // 0-100 composite score
+};
+
 export type RiskAnalysis = {
   positionSize: number;               // contracts/units
   positionNotional: number;           // USD value
@@ -177,6 +214,8 @@ export type RiskAnalysis = {
   stopReason: string | null;
   trailingStopPrice: number | null;
   partialTPs: PartialTP[];
+  // Prop firm compliance
+  propCompliance: PropCompliance | null;
 };
 
 export type PartialTP = {
@@ -270,6 +309,7 @@ export type AdvancedStrategyResult = {
   structure: MarketStructureAnalysis;
   execution: ExecutionAnalysis;
   risk: RiskAnalysis;
+  shadows: ShadowAnalysisResult;      // Shadow/wick analysis
   masterScore: number;                // -100 to +100 (composite of all pillars)
   masterDirection: 'LONG' | 'SHORT' | 'WAIT';
   masterGrade: 'A+' | 'A' | 'B' | 'C' | 'NO-TRADE';
@@ -278,6 +318,140 @@ export type AdvancedStrategyResult = {
   unifiedSignal: UnifiedSignal;
   mtf: MultiTimeframeAnalysis;
 };
+
+// ─── Prop Firm Types ─────────────────────────────────────────────────────────
+
+export type PropFirmId = 'none' | 'ftmo' | 'topstep' | 'apex' | 'the-funded-trader' | 'custom';
+
+export type ChallengePhase = 'challenge' | 'verification' | 'funded';
+
+export type PropFirmPreset = {
+  id: PropFirmId;
+  name: string;
+  accountSizes: number[];
+  phases: {
+    [K in ChallengePhase]: {
+      profitTarget: number;           // % of account
+      maxDailyLoss: number;           // % of account
+      maxTotalDrawdown: number;       // % of account
+      trailingDrawdown: boolean;      // does the drawdown trail with equity?
+      minTradingDays: number;
+      maxTradingDays: number;         // 0 = unlimited
+      consistencyRule: number;        // max % of total profit from single trade (0 = none)
+      weekendHolding: boolean;        // allowed to hold over weekend?
+      newsTrading: boolean;           // allowed to trade during news?
+      maxLeverage: number;
+      profitSplit: number;            // % that goes to trader (funded only)
+    };
+  };
+};
+
+export const PROP_FIRM_PRESETS: PropFirmPreset[] = [
+  {
+    id: 'ftmo',
+    name: 'FTMO',
+    accountSizes: [10000, 25000, 50000, 100000, 200000],
+    phases: {
+      challenge: {
+        profitTarget: 10, maxDailyLoss: 5, maxTotalDrawdown: 10,
+        trailingDrawdown: false, minTradingDays: 4, maxTradingDays: 30,
+        consistencyRule: 0, weekendHolding: true, newsTrading: true,
+        maxLeverage: 100, profitSplit: 0,
+      },
+      verification: {
+        profitTarget: 5, maxDailyLoss: 5, maxTotalDrawdown: 10,
+        trailingDrawdown: false, minTradingDays: 4, maxTradingDays: 60,
+        consistencyRule: 0, weekendHolding: true, newsTrading: true,
+        maxLeverage: 100, profitSplit: 0,
+      },
+      funded: {
+        profitTarget: 0, maxDailyLoss: 5, maxTotalDrawdown: 10,
+        trailingDrawdown: false, minTradingDays: 0, maxTradingDays: 0,
+        consistencyRule: 0, weekendHolding: true, newsTrading: true,
+        maxLeverage: 100, profitSplit: 80,
+      },
+    },
+  },
+  {
+    id: 'topstep',
+    name: 'Topstep',
+    accountSizes: [50000, 100000, 150000],
+    phases: {
+      challenge: {
+        profitTarget: 6, maxDailyLoss: 2, maxTotalDrawdown: 4,
+        trailingDrawdown: true, minTradingDays: 5, maxTradingDays: 0,
+        consistencyRule: 40, weekendHolding: false, newsTrading: true,
+        maxLeverage: 50, profitSplit: 0,
+      },
+      verification: {
+        profitTarget: 6, maxDailyLoss: 2, maxTotalDrawdown: 4,
+        trailingDrawdown: true, minTradingDays: 5, maxTradingDays: 0,
+        consistencyRule: 40, weekendHolding: false, newsTrading: true,
+        maxLeverage: 50, profitSplit: 0,
+      },
+      funded: {
+        profitTarget: 0, maxDailyLoss: 2, maxTotalDrawdown: 4,
+        trailingDrawdown: true, minTradingDays: 0, maxTradingDays: 0,
+        consistencyRule: 40, weekendHolding: false, newsTrading: true,
+        maxLeverage: 50, profitSplit: 90,
+      },
+    },
+  },
+  {
+    id: 'apex',
+    name: 'Apex Trader Funding',
+    accountSizes: [25000, 50000, 100000, 250000, 300000],
+    phases: {
+      challenge: {
+        profitTarget: 6, maxDailyLoss: 0, maxTotalDrawdown: 2.5,
+        trailingDrawdown: true, minTradingDays: 7, maxTradingDays: 0,
+        consistencyRule: 30, weekendHolding: false, newsTrading: false,
+        maxLeverage: 50, profitSplit: 0,
+      },
+      verification: {
+        profitTarget: 6, maxDailyLoss: 0, maxTotalDrawdown: 2.5,
+        trailingDrawdown: true, minTradingDays: 7, maxTradingDays: 0,
+        consistencyRule: 30, weekendHolding: false, newsTrading: false,
+        maxLeverage: 50, profitSplit: 0,
+      },
+      funded: {
+        profitTarget: 0, maxDailyLoss: 0, maxTotalDrawdown: 2.5,
+        trailingDrawdown: true, minTradingDays: 0, maxTradingDays: 0,
+        consistencyRule: 30, weekendHolding: false, newsTrading: false,
+        maxLeverage: 50, profitSplit: 100,
+      },
+    },
+  },
+  {
+    id: 'the-funded-trader',
+    name: 'The Funded Trader',
+    accountSizes: [5000, 10000, 25000, 50000, 100000, 200000],
+    phases: {
+      challenge: {
+        profitTarget: 8, maxDailyLoss: 5, maxTotalDrawdown: 10,
+        trailingDrawdown: false, minTradingDays: 3, maxTradingDays: 35,
+        consistencyRule: 0, weekendHolding: true, newsTrading: true,
+        maxLeverage: 100, profitSplit: 0,
+      },
+      verification: {
+        profitTarget: 5, maxDailyLoss: 5, maxTotalDrawdown: 10,
+        trailingDrawdown: false, minTradingDays: 3, maxTradingDays: 60,
+        consistencyRule: 0, weekendHolding: true, newsTrading: true,
+        maxLeverage: 100, profitSplit: 0,
+      },
+      funded: {
+        profitTarget: 0, maxDailyLoss: 5, maxTotalDrawdown: 10,
+        trailingDrawdown: false, minTradingDays: 0, maxTradingDays: 0,
+        consistencyRule: 0, weekendHolding: true, newsTrading: true,
+        maxLeverage: 100, profitSplit: 80,
+      },
+    },
+  },
+];
+
+export function getPropPreset(id: PropFirmId): PropFirmPreset | null {
+  return PROP_FIRM_PRESETS.find(p => p.id === id) ?? null;
+}
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -294,6 +468,12 @@ export type AdvancedConfig = {
   useKellySizing: boolean;
   kellyFractionMultiplier: number;    // 0.25-1.0 (half-kelly = 0.5)
   sessionFilter: boolean;             // only trade during active sessions
+  // Prop firm settings
+  propFirmMode: boolean;              // enable prop firm rule enforcement
+  propFirmId: PropFirmId;
+  propPhase: ChallengePhase;
+  propAccountSize: number;            // selected account size
+  propStartDate: number;              // timestamp of challenge start
   // Pillar weights for master score
   weights: {
     orderFlow: number;                // 0-1
@@ -317,6 +497,11 @@ export const DEFAULT_ADVANCED_CONFIG: AdvancedConfig = {
   useKellySizing: true,
   kellyFractionMultiplier: 0.5,
   sessionFilter: false,
+  propFirmMode: false,
+  propFirmId: 'none',
+  propPhase: 'challenge',
+  propAccountSize: 0,
+  propStartDate: 0,
   weights: {
     orderFlow: 0.25,
     liquidity: 0.20,
@@ -834,6 +1019,7 @@ export function analyzeExecution(
   orderFlow: OrderFlowAnalysis,
   liquidity: LiquidityAnalysis,
   structure: MarketStructureAnalysis,
+  shadows: ShadowAnalysisResult,
   config: AdvancedConfig,
 ): ExecutionAnalysis {
   const defaultResult: ExecutionAnalysis = {
@@ -1042,6 +1228,50 @@ export function analyzeExecution(
     passed: !isNaN(indicators.adx.value) && indicators.adx.value > 20,
     weight: 2,
     detail: `ADX: ${indicators.adx.value.toFixed(1)}`,
+  });
+
+  // SHADOW / WICK checks
+  const recentShadowPatterns = shadows.patterns.slice(0, 5);
+  const bullishShadows = recentShadowPatterns.filter(p => p.direction === 'bullish');
+  const bearishShadows = recentShadowPatterns.filter(p => p.direction === 'bearish');
+
+  checklist.push({
+    id: 'sh-1', category: 'execution',
+    label: 'Shadow patterns confirm direction',
+    passed: direction === 'LONG'
+      ? bullishShadows.length > bearishShadows.length
+      : direction === 'SHORT'
+      ? bearishShadows.length > bullishShadows.length
+      : false,
+    weight: 4,
+    detail: `Shadows: ${bullishShadows.length} bull, ${bearishShadows.length} bear${recentShadowPatterns.length > 0 ? ` (${recentShadowPatterns[0].type})` : ''}`,
+  });
+
+  checklist.push({
+    id: 'sh-2', category: 'execution',
+    label: 'No stop hunt against trade',
+    passed: !shadows.stopHunts.some(sh =>
+      sh.recovered && (
+        (direction === 'LONG' && sh.type === 'short') ||
+        (direction === 'SHORT' && sh.type === 'long')
+      )
+    ),
+    weight: 5,
+    detail: shadows.stopHunts.length > 0
+      ? `${shadows.stopHunts[0].type} hunt at ${shadows.stopHunts[0].levelHunted.toFixed(1)}`
+      : 'No stop hunts detected',
+  });
+
+  checklist.push({
+    id: 'sh-3', category: 'execution',
+    label: 'Shadow cluster zone supports entry',
+    passed: direction === 'LONG'
+      ? shadows.clusterZones.some(z => z.type === 'support' && z.midPrice < currentPrice && z.strength > 40)
+      : direction === 'SHORT'
+      ? shadows.clusterZones.some(z => z.type === 'resistance' && z.midPrice > currentPrice && z.strength > 40)
+      : false,
+    weight: 3,
+    detail: `${shadows.clusterZones.length} cluster zones, bias: ${shadows.bias}`,
   });
 
   // ── Calculate confluence score ──
@@ -1290,6 +1520,22 @@ export function analyzeRisk(
     { price: execution.takeProfit3, percent: 25, label: 'TP3 (25%)' },
   ];
 
+  // ── Prop Firm Compliance ──
+  let propCompliance: PropCompliance | null = null;
+  if (config.propFirmMode && config.propFirmId !== 'none') {
+    propCompliance = analyzePropCompliance(config, tradeHistory, dailyPnl, dailyPnlPct, drawdownCurrent, currentEquity, peak);
+    // Override shouldStop based on prop rules
+    if (propCompliance.overallStatus === 'violated') {
+      shouldStop = true;
+      const violatedRule = propCompliance.rules.find(r => r.severity === 'violated');
+      stopReason = `⛔ PROP RULE VIOLATED: ${violatedRule?.label ?? 'Unknown rule'}`;
+    }
+    // Extra caution in prop mode — reduce size when warning
+    if (propCompliance.overallStatus === 'warning' && sizeMultiplier > 0.5) {
+      sizeMultiplier *= 0.6;
+    }
+  }
+
   return {
     positionSize, positionNotional, riskAmount, riskPercent,
     rewardAmount, rewardPercent, kellyFraction, adjustedKelly,
@@ -1301,6 +1547,239 @@ export function analyzeRisk(
     dailyPnl, dailyPnlPct,
     shouldStop, stopReason,
     trailingStopPrice, partialTPs,
+    propCompliance,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROP FIRM COMPLIANCE ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function analyzePropCompliance(
+  config: AdvancedConfig,
+  tradeHistory: TradeRecord[],
+  dailyPnl: number,
+  dailyPnlPct: number,
+  drawdownCurrent: number,
+  currentEquity: number,
+  peakEquity: number,
+): PropCompliance {
+  const preset = getPropPreset(config.propFirmId);
+  const accountSize = config.propAccountSize || config.capital;
+  const phase = preset?.phases[config.propPhase];
+  const rules: PropComplianceRule[] = [];
+
+  // Defaults if no preset
+  const maxDailyLossPct = phase?.maxDailyLoss ?? config.maxDailyLoss;
+  const maxTotalDD = phase?.maxTotalDrawdown ?? config.maxDrawdown;
+  const profitTargetPct = phase?.profitTarget ?? 0;
+  const trailingDD = phase?.trailingDrawdown ?? false;
+  const minDays = phase?.minTradingDays ?? 0;
+  const maxDays = phase?.maxTradingDays ?? 0;
+  const consistencyRuleMax = phase?.consistencyRule ?? 0;
+  const weekendHolding = phase?.weekendHolding ?? true;
+  const newsTrading = phase?.newsTrading ?? true;
+  const maxLeverage = phase?.maxLeverage ?? 100;
+  const profitSplit = phase?.profitSplit ?? 0;
+
+  // ── Calculate totals ──
+  const totalPnl = tradeHistory.reduce((s, t) => s + t.pnl, 0);
+  const totalPnlPct = accountSize > 0 ? (totalPnl / accountSize) * 100 : 0;
+  const profitTarget = accountSize * (profitTargetPct / 100);
+
+  // ── Trailing Drawdown ──
+  // For trailing DD firms, the max loss level trails up with equity but never down
+  let trailingDrawdownLevel = accountSize; // initial level
+  let runningEquity = accountSize;
+  for (const t of tradeHistory) {
+    runningEquity += t.pnl;
+    if (trailingDD && runningEquity > trailingDrawdownLevel) {
+      trailingDrawdownLevel = runningEquity;
+    }
+  }
+  if (!trailingDD) {
+    trailingDrawdownLevel = accountSize; // fixed from start
+  }
+  const trailingDrawdownLimit = trailingDrawdownLevel * (1 - maxTotalDD / 100);
+  const trailingDrawdownPct = trailingDrawdownLevel > 0
+    ? ((trailingDrawdownLevel - currentEquity) / trailingDrawdownLevel) * 100
+    : 0;
+
+  // ── Trading Days ──
+  const tradingDaysSet = new Set<string>();
+  for (const t of tradeHistory) {
+    tradingDaysSet.add(new Date(t.time).toISOString().slice(0, 10));
+  }
+  const daysTraded = tradingDaysSet.size;
+  const daysSinceStart = config.propStartDate > 0
+    ? Math.floor((Date.now() - config.propStartDate) / (1000 * 60 * 60 * 24))
+    : daysTraded;
+  const daysRemaining = maxDays > 0 ? Math.max(0, maxDays - daysSinceStart) : -1;
+
+  // ── Consistency Rule ──
+  const winTrades = tradeHistory.filter(t => t.pnl > 0);
+  const totalProfit = winTrades.reduce((s, t) => s + t.pnl, 0);
+  const maxSingleTrade = winTrades.length > 0
+    ? Math.max(...winTrades.map(t => t.pnl))
+    : 0;
+  const maxSingleTradePct = totalProfit > 0 ? (maxSingleTrade / totalProfit) * 100 : 0;
+  const consistencyScore = consistencyRuleMax > 0
+    ? Math.max(0, 100 - (maxSingleTradePct / consistencyRuleMax) * 100)
+    : 100;
+
+  // ── Is Weekend? ──
+  const now = new Date();
+  const isWeekend = now.getDay() === 0 || now.getDay() === 6;
+
+  // ── Build Rules ──
+
+  // Rule 1: Daily Loss Limit
+  if (maxDailyLossPct > 0) {
+    const pctUsed = Math.abs(dailyPnlPct) / maxDailyLossPct * 100;
+    const severity: PropComplianceRule['severity'] =
+      dailyPnlPct <= -maxDailyLossPct ? 'violated'
+      : pctUsed > 75 ? 'danger'
+      : pctUsed > 50 ? 'warning'
+      : 'ok';
+    rules.push({
+      id: 'daily-loss', label: 'Daily Loss Limit',
+      passed: dailyPnlPct > -maxDailyLossPct,
+      current: `${dailyPnlPct.toFixed(2)}%`,
+      limit: `-${maxDailyLossPct}%`,
+      severity, pctUsed: Math.min(100, pctUsed),
+    });
+  }
+
+  // Rule 2: Max Drawdown (trailing or fixed)
+  const ddPctUsed = maxTotalDD > 0 ? (trailingDD ? trailingDrawdownPct : drawdownCurrent) / maxTotalDD * 100 : 0;
+  const currentDDval = trailingDD ? trailingDrawdownPct : drawdownCurrent;
+  const ddSeverity: PropComplianceRule['severity'] =
+    currentDDval >= maxTotalDD ? 'violated'
+    : ddPctUsed > 75 ? 'danger'
+    : ddPctUsed > 50 ? 'warning'
+    : 'ok';
+  rules.push({
+    id: 'max-drawdown', label: trailingDD ? 'Trailing Drawdown' : 'Max Drawdown',
+    passed: currentDDval < maxTotalDD,
+    current: `${currentDDval.toFixed(2)}%`,
+    limit: `${maxTotalDD}%`,
+    severity: ddSeverity, pctUsed: Math.min(100, ddPctUsed),
+  });
+
+  // Rule 3: Profit Target Progress (challenge/verification only)
+  if (profitTargetPct > 0) {
+    const progress = Math.max(0, Math.min(100, (totalPnlPct / profitTargetPct) * 100));
+    rules.push({
+      id: 'profit-target', label: 'Profit Target',
+      passed: totalPnlPct >= profitTargetPct,
+      current: `${totalPnlPct.toFixed(2)}%`,
+      limit: `${profitTargetPct}%`,
+      severity: totalPnlPct >= profitTargetPct ? 'ok' : progress > 50 ? 'ok' : 'warning',
+      pctUsed: progress,
+    });
+  }
+
+  // Rule 4: Minimum Trading Days
+  if (minDays > 0) {
+    const progress = (daysTraded / minDays) * 100;
+    rules.push({
+      id: 'min-days', label: 'Min Trading Days',
+      passed: daysTraded >= minDays,
+      current: `${daysTraded}`,
+      limit: `${minDays}`,
+      severity: daysTraded >= minDays ? 'ok' : 'warning',
+      pctUsed: Math.min(100, progress),
+    });
+  }
+
+  // Rule 5: Max Trading Days / Time Limit
+  if (maxDays > 0) {
+    const pctUsed = (daysSinceStart / maxDays) * 100;
+    rules.push({
+      id: 'max-days', label: 'Time Limit',
+      passed: daysSinceStart <= maxDays,
+      current: `Day ${daysSinceStart}`,
+      limit: `${maxDays} days`,
+      severity: daysSinceStart > maxDays ? 'violated' : pctUsed > 85 ? 'danger' : pctUsed > 60 ? 'warning' : 'ok',
+      pctUsed: Math.min(100, pctUsed),
+    });
+  }
+
+  // Rule 6: Consistency Rule
+  if (consistencyRuleMax > 0) {
+    const pctUsed = (maxSingleTradePct / consistencyRuleMax) * 100;
+    rules.push({
+      id: 'consistency', label: 'Consistency Rule',
+      passed: maxSingleTradePct <= consistencyRuleMax,
+      current: `${maxSingleTradePct.toFixed(1)}%`,
+      limit: `${consistencyRuleMax}%`,
+      severity: maxSingleTradePct > consistencyRuleMax ? 'violated' : pctUsed > 80 ? 'danger' : pctUsed > 60 ? 'warning' : 'ok',
+      pctUsed: Math.min(100, pctUsed),
+    });
+  }
+
+  // Rule 7: Weekend Holding
+  if (!weekendHolding) {
+    rules.push({
+      id: 'weekend', label: 'No Weekend Holding',
+      passed: !isWeekend,
+      current: isWeekend ? 'WEEKEND' : 'Weekday',
+      limit: 'Close before Fri',
+      severity: isWeekend ? 'danger' : 'ok',
+      pctUsed: isWeekend ? 100 : 0,
+    });
+  }
+
+  // Rule 8: Leverage Check
+  if (config.leverage > maxLeverage) {
+    rules.push({
+      id: 'leverage', label: 'Max Leverage',
+      passed: config.leverage <= maxLeverage,
+      current: `${config.leverage}x`,
+      limit: `${maxLeverage}x`,
+      severity: 'violated',
+      pctUsed: 100,
+    });
+  }
+
+  // ── Overall Status ──
+  const hasViolation = rules.some(r => r.severity === 'violated');
+  const hasDanger = rules.some(r => r.severity === 'danger');
+  const overallStatus: PropCompliance['overallStatus'] =
+    hasViolation ? 'violated' : hasDanger ? 'warning' : 'compliant';
+
+  // ── Progress to Target ──
+  const progressToTarget = profitTargetPct > 0
+    ? Math.max(0, Math.min(100, (totalPnlPct / profitTargetPct) * 100))
+    : 0;
+
+  // ── Estimated Payout ──
+  const estimatedPayout = totalPnl > 0 ? totalPnl * (profitSplit / 100) : 0;
+
+  // ── Account Health (composite score) ──
+  const ddHealth = maxTotalDD > 0 ? Math.max(0, 100 - ddPctUsed) : 100;
+  const dailyHealth = maxDailyLossPct > 0 ? Math.max(0, 100 - (Math.abs(dailyPnlPct) / maxDailyLossPct * 100)) : 100;
+  const consistencyHealth = consistencyRuleMax > 0 ? consistencyScore : 100;
+  const accountHealth = (ddHealth * 0.4 + dailyHealth * 0.35 + consistencyHealth * 0.25);
+
+  return {
+    rules,
+    overallStatus,
+    profitTarget,
+    profitTargetPct,
+    currentProfitPct: totalPnlPct,
+    progressToTarget,
+    trailingDrawdownLevel,
+    trailingDrawdownPct,
+    daysTraded,
+    minDaysRequired: minDays,
+    maxDaysAllowed: maxDays,
+    daysRemaining,
+    consistencyScore,
+    maxSingleTradePct,
+    profitSplit,
+    estimatedPayout,
+    accountHealth,
   };
 }
 
@@ -1758,25 +2237,28 @@ export function runAdvancedStrategy(
     // May fail with insufficient data
   }
 
-  // ── Run all 5 pillars ──
+  // ── Run all 5 pillars + shadow analysis ──
   const orderFlow = analyzeOrderFlow(candles, trades, orderBook);
   const liquidity = analyzeLiquidity(candles, pa, orderBook);
   const structure = analyzeStructure(candles, indicators, pa);
-  const execution = analyzeExecution(candles, indicators, orderFlow, liquidity, structure, config);
+  const shadows = analyzeShadows(candles, { lookback: 50, clusterLookback: 100 });
+  const execution = analyzeExecution(candles, indicators, orderFlow, liquidity, structure, shadows, config);
   const risk = analyzeRisk(execution, config, tradeHistory);
 
   // ── Multi-Timeframe Analysis ──
   const mtf = analyzeMultiTimeframe(candles);
 
-  // ── Master Score (now includes MTF) ──
+  // ── Master Score (now includes MTF + shadows) ──
   const mtfBonus = mtf.htfScore * 0.15; // add 15% weight for MTF alignment
+  const shadowBonus = shadows.score * 0.10; // add 10% weight for shadow bias
   const masterScore =
     orderFlow.score * config.weights.orderFlow +
     liquidity.score * config.weights.liquidity +
     structure.score * config.weights.structure +
     (execution.confluenceScore - 50) * config.weights.execution +
     (50 - risk.heatIndex) * config.weights.risk +
-    mtfBonus;
+    mtfBonus +
+    shadowBonus;
 
   // ── Master Direction ──
   let masterDirection: 'LONG' | 'SHORT' | 'WAIT' = execution.direction;
@@ -1800,6 +2282,12 @@ export function runAdvancedStrategy(
   if (masterDirection === 'LONG' && mtf.htfBias === 'bearish') confidence *= 0.7;
   if (masterDirection === 'SHORT' && mtf.htfBias === 'bullish') confidence *= 0.7;
 
+  // Boost/reduce confidence based on shadow analysis
+  if (masterDirection === 'LONG' && shadows.bias === 'bullish') confidence = Math.min(100, confidence + 5);
+  if (masterDirection === 'SHORT' && shadows.bias === 'bearish') confidence = Math.min(100, confidence + 5);
+  if (masterDirection === 'LONG' && shadows.bias === 'bearish') confidence *= 0.9;
+  if (masterDirection === 'SHORT' && shadows.bias === 'bullish') confidence *= 0.9;
+
   // ── Pending Setups ──
   const currentPrice = candles[candles.length - 1].close;
   const pendingSetups = generatePendingSetups(
@@ -1820,6 +2308,7 @@ export function runAdvancedStrategy(
     structure,
     execution,
     risk,
+    shadows,
     masterScore,
     masterDirection,
     masterGrade,
