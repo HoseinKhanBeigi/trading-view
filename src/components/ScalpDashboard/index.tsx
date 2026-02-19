@@ -9,6 +9,9 @@ import {
   type AdvancedConfig,
   type TradeRecord,
   type ChecklistItem,
+  type SignalHistoryEntry,
+  type PendingSetup,
+  type UnifiedSignal,
   DEFAULT_ADVANCED_CONFIG,
 } from "@/lib/advanced-strategy";
 
@@ -104,10 +107,13 @@ export default function ScalpDashboard() {
   const [config, setConfig] = useState<AdvancedConfig>(DEFAULT_ADVANCED_CONFIG);
   const [result, setResult] = useState<AdvancedStrategyResult | null>(null);
   const [tradeHistory, setTradeHistory] = useState<TradeRecord[]>([]);
+  const [signalHistory, setSignalHistory] = useState<SignalHistoryEntry[]>([]);
   const [showConfig, setShowConfig] = useState(false);
   const [showChecklist, setShowChecklist] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [activeTab, setActiveTab] = useState<'signal' | 'flow' | 'liquidity' | 'structure' | 'risk'>('signal');
   const lastUpdateRef = useRef(0);
+  const lastSignalDirRef = useRef<string>('WAIT');
 
   // Build a minimal OrderBook from depth data
   const orderBook = useMemo(() => {
@@ -130,7 +136,32 @@ export default function ScalpDashboard() {
     const strategyResult = runAdvancedStrategy(
       candles, trades, orderBook, tradeHistory, config, symbol
     );
-    if (strategyResult) setResult(strategyResult);
+    if (strategyResult) {
+      setResult(strategyResult);
+
+      // Track signal history — log when direction changes
+      const newDir = strategyResult.masterDirection;
+      if (newDir !== 'WAIT' && newDir !== lastSignalDirRef.current) {
+        const entry: SignalHistoryEntry = {
+          timestamp: Date.now(),
+          direction: newDir,
+          grade: strategyResult.masterGrade,
+          price: candles[candles.length - 1].close,
+          entry: strategyResult.execution.entry,
+          stopLoss: strategyResult.execution.stopLoss,
+          tp1: strategyResult.execution.takeProfit1,
+          confluenceScore: strategyResult.execution.confluenceScore,
+          expired: false,
+          reason: strategyResult.execution.reasons.join(', ') || strategyResult.unifiedSignal.summary,
+        };
+        setSignalHistory(prev => [entry, ...prev].slice(0, 20)); // keep last 20
+      }
+      // Mark old signals as expired if direction changed
+      if (newDir !== lastSignalDirRef.current && lastSignalDirRef.current !== 'WAIT') {
+        setSignalHistory(prev => prev.map((s, i) => i > 0 ? { ...s, expired: true } : s));
+      }
+      lastSignalDirRef.current = newDir;
+    }
   }, [candles, trades, orderBook, tradeHistory, config, symbol, interval]);
 
   // Log a trade
@@ -303,186 +334,308 @@ export default function ScalpDashboard() {
       {/* ══ Content ══ */}
         <div className="p-3 sm:p-4">
 
-        {/* ── SIGNAL TAB ── */}
-        {activeTab === 'signal' && r && !(liveRisk?.shouldStop) && r.masterDirection !== 'WAIT' ? (
-          <div>
-            {/* Master Score Bars */}
-            <div className="space-y-1 mb-4">
-              <ScoreBar value={r.orderFlow.score} label="Order Flow" />
-              <ScoreBar value={r.liquidity.score} label="Liquidity" />
-              <ScoreBar value={r.structure.score} label="Structure" />
-              <ScoreBar value={r.execution.confluenceScore - 50} label="Execution" />
-              <div className="pt-1 border-t border-zinc-800/30">
+        {/* ── UNIFIED SIGNAL TAB ── */}
+        {activeTab === 'signal' && r ? (
+          <div className="space-y-3">
+            {/* ▓▓ ACTION ADVICE BAR ▓▓ */}
+            <div className={`rounded-xl p-3 text-center ${
+              r.masterDirection === 'LONG'
+                ? 'bg-gradient-to-r from-emerald-950/60 to-emerald-900/30 ring-1 ring-emerald-500/40'
+                : r.masterDirection === 'SHORT'
+                ? 'bg-gradient-to-r from-rose-950/60 to-rose-900/30 ring-1 ring-rose-500/40'
+                : 'bg-gradient-to-r from-zinc-900/60 to-zinc-800/30 ring-1 ring-zinc-700/40'
+            }`}>
+              <div className="text-[10px] font-bold tracking-wider uppercase mb-1 text-zinc-400">
+                {r.unifiedSignal.direction.replace('_', ' ')}
+              </div>
+              <div className={`text-sm font-black ${
+                r.masterDirection === 'LONG' ? 'text-emerald-400' : r.masterDirection === 'SHORT' ? 'text-rose-400' : 'text-zinc-300'
+              }`}>
+                {r.unifiedSignal.actionAdvice}
+              </div>
+              <div className="text-[9px] text-zinc-500 mt-1">{r.unifiedSignal.summary}</div>
+            </div>
+
+            {/* ▓▓ PILLAR OVERVIEW ▓▓ */}
+            <div className="rounded-xl bg-zinc-900/30 p-2.5 space-y-1.5">
+              <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-1">5-Pillar + MTF Confluence</div>
+              {r.unifiedSignal.pillarSummary.map((p, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <span className="text-[10px]">{
+                    p.status === 'bullish' ? '🟢' : p.status === 'bearish' ? '🔴' : '⚪'
+                  }</span>
+                  <span className="text-[9px] font-semibold w-20 text-zinc-300">{p.name}</span>
+                  <div className="flex-1 h-1.5 bg-zinc-800/60 rounded-full overflow-hidden relative">
+                    <div className="absolute inset-y-0 left-1/2 w-px bg-zinc-600/40" />
+                    {p.score >= 0 ? (
+                      <div className="absolute inset-y-0 left-1/2 bg-emerald-500 rounded-r-full transition-all" style={{ width: `${Math.min(50, Math.abs(p.score) / 2)}%` }} />
+                    ) : (
+                      <div className="absolute inset-y-0 right-1/2 bg-rose-500 rounded-l-full transition-all" style={{ width: `${Math.min(50, Math.abs(p.score) / 2)}%` }} />
+                    )}
+                  </div>
+                  <span className={`text-[8px] font-mono w-6 text-right font-bold ${p.score >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {p.score > 0 ? '+' : ''}{p.score.toFixed(0)}
+                  </span>
+                  <span className="text-[7px] text-zinc-500 w-40 truncate hidden sm:block">{p.detail}</span>
+                </div>
+              ))}
+              <div className="pt-1.5 border-t border-zinc-800/40">
                 <ScoreBar value={r.masterScore} label="MASTER" color={r.masterScore >= 0 ? 'bg-emerald-400' : 'bg-rose-400'} />
               </div>
             </div>
 
-            {/* Direction & Grade */}
-          <div className={`rounded-xl p-3 sm:p-4 ${
-              r.masterDirection === 'LONG'
-              ? 'bg-gradient-to-br from-emerald-50 to-emerald-100/50 dark:from-emerald-950/40 dark:to-emerald-900/20 ring-1 ring-emerald-300/50 dark:ring-emerald-600/30'
-              : 'bg-gradient-to-br from-rose-50 to-rose-100/50 dark:from-rose-950/40 dark:to-rose-900/20 ring-1 ring-rose-300/50 dark:ring-rose-600/30'
-          }`}>
-            <div className="flex items-center gap-2 mb-3">
-              <span className={`text-2xl font-black ${
-                  r.masterDirection === 'LONG' ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+            {/* ▓▓ KEY LEVELS ▓▓ */}
+            <div className="rounded-xl bg-zinc-900/30 p-2.5">
+              <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">Key Levels</div>
+              <div className="flex items-center gap-1 text-[9px]">
+                <div className="text-center flex-1">
+                  <div className="text-[7px] text-zinc-500 uppercase">Strong Sup</div>
+                  <div className="font-mono font-bold text-emerald-500">{formatPrice(r.unifiedSignal.keyLevels.strongSupport)}</div>
+                </div>
+                <div className="text-zinc-700">›</div>
+                <div className="text-center flex-1">
+                  <div className="text-[7px] text-zinc-500 uppercase">Near Sup</div>
+                  <div className="font-mono font-bold text-emerald-400">{formatPrice(r.unifiedSignal.keyLevels.nearSupport)}</div>
+                </div>
+                <div className="text-zinc-700">›</div>
+                <div className="text-center flex-1 bg-zinc-800/40 rounded-lg py-1">
+                  <div className="text-[7px] text-violet-400 uppercase font-bold">Price</div>
+                  <div className="font-mono font-black text-violet-300">{formatPrice(r.unifiedSignal.keyLevels.currentPrice)}</div>
+                </div>
+                <div className="text-zinc-700">›</div>
+                <div className="text-center flex-1">
+                  <div className="text-[7px] text-zinc-500 uppercase">Near Res</div>
+                  <div className="font-mono font-bold text-rose-400">{formatPrice(r.unifiedSignal.keyLevels.nearResistance)}</div>
+                </div>
+                <div className="text-zinc-700">›</div>
+                <div className="text-center flex-1">
+                  <div className="text-[7px] text-zinc-500 uppercase">Strong Res</div>
+                  <div className="font-mono font-bold text-rose-500">{formatPrice(r.unifiedSignal.keyLevels.strongResistance)}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* ▓▓ MTF ALIGNMENT ▓▓ */}
+            <div className="rounded-xl bg-zinc-900/30 p-2.5">
+              <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                Multi-Timeframe • <span className={
+                  r.mtf.alignment === 'aligned-bull' ? 'text-emerald-400' : r.mtf.alignment === 'aligned-bear' ? 'text-rose-400' : 'text-amber-400'
+                }>{r.mtf.alignment.replace('-', ' ').toUpperCase()}</span>
+              </div>
+              <div className="grid grid-cols-4 gap-1.5">
+                {r.mtf.timeframes.map(tf => (
+                  <div key={tf.tf} className={`rounded-lg p-1.5 text-center ${
+                    tf.trend === 'bullish' ? 'bg-emerald-900/20 ring-1 ring-emerald-700/30'
+                    : tf.trend === 'bearish' ? 'bg-rose-900/20 ring-1 ring-rose-700/30'
+                    : 'bg-zinc-800/30 ring-1 ring-zinc-700/20'
+                  }`}>
+                    <div className="text-[9px] font-black">{tf.tf}</div>
+                    <div className={`text-[8px] font-bold ${
+                      tf.trend === 'bullish' ? 'text-emerald-400' : tf.trend === 'bearish' ? 'text-rose-400' : 'text-zinc-400'
+                    }`}>{tf.trend.toUpperCase()}</div>
+                    <div className="text-[7px] text-zinc-500">RSI:{tf.rsi.toFixed(0)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ▓▓ ACTIVE SIGNAL (when trading) ▓▓ */}
+            {r.masterDirection !== 'WAIT' && !liveRisk?.shouldStop && (
+              <div className={`rounded-xl p-3 ${
+                r.masterDirection === 'LONG'
+                  ? 'bg-gradient-to-br from-emerald-950/40 to-emerald-900/20 ring-1 ring-emerald-600/30'
+                  : 'bg-gradient-to-br from-rose-950/40 to-rose-900/20 ring-1 ring-rose-600/30'
               }`}>
-                  {r.masterDirection === 'LONG' ? '🟢 LONG' : '🔴 SHORT'}
-              </span>
-                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${gradeColor(r.masterGrade)}`}>
-                  {r.masterGrade}
-              </span>
-                <span className="ml-auto text-[10px] text-zinc-400">
-                  Confidence: <span className="font-bold dark-mode-text">{r.confidence.toFixed(0)}%</span>
-              </span>
-            </div>
+                <div className="flex items-center gap-2 mb-3">
+                  <span className={`text-xl font-black ${
+                    r.masterDirection === 'LONG' ? 'text-emerald-400' : 'text-rose-400'
+                  }`}>
+                    {r.masterDirection === 'LONG' ? '🟢 LONG' : '🔴 SHORT'}
+                  </span>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${gradeColor(r.masterGrade)}`}>
+                    {r.masterGrade}
+                  </span>
+                  <span className="ml-auto text-[10px] text-zinc-400">
+                    Conviction: <span className="font-bold dark-mode-text">{r.unifiedSignal.conviction.toFixed(0)}%</span>
+                  </span>
+                </div>
 
-              {/* Entry / SL / TP Grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
-              <div className="rounded-lg bg-white/60 dark:bg-zinc-800/60 p-2 text-center">
-                  <div className="text-[9px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Entry</div>
-                  <div className="font-mono font-black text-sm dark-mode-text">{formatPrice(r.execution.entry)}</div>
-              </div>
-              <div className="rounded-lg bg-rose-50/60 dark:bg-rose-900/20 p-2 text-center">
-                  <div className="text-[9px] font-semibold uppercase tracking-wide text-rose-400">Stop Loss</div>
-                  <div className="font-mono font-black text-sm text-rose-600 dark:text-rose-400">{formatPrice(r.execution.stopLoss)}</div>
-                  <div className="text-[8px] text-rose-400">-{(Math.abs(r.execution.entry - r.execution.stopLoss) / r.execution.entry * 100).toFixed(2)}%</div>
-              </div>
-              <div className="rounded-lg bg-emerald-50/60 dark:bg-emerald-900/20 p-2 text-center">
-                  <div className="text-[9px] font-semibold uppercase tracking-wide text-emerald-400">TP1</div>
-                  <div className="font-mono font-black text-sm text-emerald-600 dark:text-emerald-400">{formatPrice(r.execution.takeProfit1)}</div>
-                  <div className="text-[8px] text-emerald-400">+{(Math.abs(r.execution.takeProfit1 - r.execution.entry) / r.execution.entry * 100).toFixed(2)}%</div>
-              </div>
-              <div className="rounded-lg bg-emerald-50/30 dark:bg-emerald-900/10 p-2 text-center">
-                <div className="text-[9px] font-semibold uppercase tracking-wide text-emerald-300 dark:text-emerald-600">TP2</div>
-                  <div className="font-mono font-black text-sm text-emerald-500">{formatPrice(r.execution.takeProfit2)}</div>
-                  <div className="text-[8px] text-emerald-400">+{(Math.abs(r.execution.takeProfit2 - r.execution.entry) / r.execution.entry * 100).toFixed(2)}%</div>
-              </div>
-            </div>
-
-            {/* Position Sizing */}
-            <div className="rounded-lg bg-white/50 dark:bg-zinc-800/40 p-2 mb-3">
-                <div className="text-[9px] font-semibold uppercase tracking-wide text-zinc-400 mb-1.5">
-                  Position • ${config.capital} • {config.leverage}x {config.useKellySizing ? '• Kelly' : ''}
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
-                <div>
-                  <span className="text-zinc-400">Size: </span>
-                    <span className="font-mono font-bold dark-mode-text">${(liveRisk?.positionNotional ?? 0).toFixed(0)}</span>
-                </div>
-                <div>
-                  <span className="text-zinc-400">Risk: </span>
-                  <span className="font-mono font-bold text-rose-500">
-                      ${(liveRisk?.riskAmount ?? 0).toFixed(2)} ({(liveRisk?.riskPercent ?? 0).toFixed(1)}%)
-                  </span>
-                </div>
-                <div>
-                  <span className="text-zinc-400">Reward: </span>
-                  <span className="font-mono font-bold text-emerald-500">
-                      ${(liveRisk?.rewardAmount ?? 0).toFixed(2)}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-zinc-400">R:R </span>
-                    <span className={`font-mono font-bold ${r.execution.riskReward >= 1.5 ? 'text-emerald-500' : r.execution.riskReward >= 1 ? 'text-amber-500' : 'text-rose-500'}`}>
-                      1:{r.execution.riskReward.toFixed(1)}
-                  </span>
+                {/* Entry / SL / TP Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+                  <div className="rounded-lg bg-white/5 dark:bg-zinc-800/60 p-2 text-center">
+                    <div className="text-[9px] font-semibold uppercase tracking-wide text-zinc-400">Entry</div>
+                    <div className="font-mono font-black text-sm dark-mode-text">{formatPrice(r.execution.entry)}</div>
+                  </div>
+                  <div className="rounded-lg bg-rose-900/20 p-2 text-center">
+                    <div className="text-[9px] font-semibold uppercase tracking-wide text-rose-400">Stop Loss</div>
+                    <div className="font-mono font-black text-sm text-rose-400">{formatPrice(r.execution.stopLoss)}</div>
+                    <div className="text-[8px] text-rose-400/70">-{(Math.abs(r.execution.entry - r.execution.stopLoss) / r.execution.entry * 100).toFixed(2)}%</div>
+                  </div>
+                  <div className="rounded-lg bg-emerald-900/20 p-2 text-center">
+                    <div className="text-[9px] font-semibold uppercase tracking-wide text-emerald-400">TP1</div>
+                    <div className="font-mono font-black text-sm text-emerald-400">{formatPrice(r.execution.takeProfit1)}</div>
+                    <div className="text-[8px] text-emerald-400/70">+{(Math.abs(r.execution.takeProfit1 - r.execution.entry) / r.execution.entry * 100).toFixed(2)}%</div>
+                  </div>
+                  <div className="rounded-lg bg-emerald-900/10 p-2 text-center">
+                    <div className="text-[9px] font-semibold uppercase tracking-wide text-emerald-600">TP2</div>
+                    <div className="font-mono font-black text-sm text-emerald-500">{formatPrice(r.execution.takeProfit2)}</div>
+                    <div className="text-[8px] text-emerald-400/70">+{(Math.abs(r.execution.takeProfit2 - r.execution.entry) / r.execution.entry * 100).toFixed(2)}%</div>
                   </div>
                 </div>
-                {liveRisk?.shouldReduceSize && (
-                  <div className="text-[9px] text-amber-400 mt-1">⚠ Size reduced {((1 - liveRisk.sizeMultiplier) * 100).toFixed(0)}% due to recent performance</div>
-                )}
-              </div>
 
-              {/* Partial TPs */}
-              {liveRisk && liveRisk.partialTPs.length > 0 && (
-                <div className="flex gap-1 mb-3">
-                  {liveRisk.partialTPs.map((tp, i) => (
-                    <div key={i} className="flex-1 rounded-lg bg-emerald-50/30 dark:bg-emerald-900/10 p-1.5 text-center">
-                      <div className="text-[8px] text-emerald-400 font-semibold">{tp.label}</div>
-                      <div className="font-mono text-[10px] text-emerald-500 font-bold">{formatPrice(tp.price)}</div>
+                {/* Position Sizing */}
+                <div className="rounded-lg bg-zinc-800/40 p-2 mb-3">
+                  <div className="text-[9px] font-semibold uppercase tracking-wide text-zinc-400 mb-1.5">
+                    Position • ${config.capital} • {config.leverage}x {config.useKellySizing ? '• Kelly' : ''}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+                    <div><span className="text-zinc-400">Size: </span><span className="font-mono font-bold dark-mode-text">${(liveRisk?.positionNotional ?? 0).toFixed(0)}</span></div>
+                    <div><span className="text-zinc-400">Risk: </span><span className="font-mono font-bold text-rose-500">${(liveRisk?.riskAmount ?? 0).toFixed(2)} ({(liveRisk?.riskPercent ?? 0).toFixed(1)}%)</span></div>
+                    <div><span className="text-zinc-400">Reward: </span><span className="font-mono font-bold text-emerald-500">${(liveRisk?.rewardAmount ?? 0).toFixed(2)}</span></div>
+                    <div><span className="text-zinc-400">R:R </span><span className={`font-mono font-bold ${r.execution.riskReward >= 1.5 ? 'text-emerald-500' : r.execution.riskReward >= 1 ? 'text-amber-500' : 'text-rose-500'}`}>1:{r.execution.riskReward.toFixed(1)}</span></div>
+                  </div>
+                  {liveRisk?.shouldReduceSize && (
+                    <div className="text-[9px] text-amber-400 mt-1">⚠ Size reduced {((1 - liveRisk.sizeMultiplier) * 100).toFixed(0)}%</div>
+                  )}
+                </div>
+
+                {/* Partial TPs */}
+                {liveRisk && liveRisk.partialTPs.length > 0 && (
+                  <div className="flex gap-1 mb-3">
+                    {liveRisk.partialTPs.map((tp, i) => (
+                      <div key={i} className="flex-1 rounded-lg bg-emerald-900/10 p-1.5 text-center">
+                        <div className="text-[8px] text-emerald-400 font-semibold">{tp.label}</div>
+                        <div className="font-mono text-[10px] text-emerald-500 font-bold">{formatPrice(tp.price)}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Reasons & Warnings */}
+                <div className="flex flex-wrap gap-1 mb-2">
+                  {r.execution.reasons.map((reason, i) => (
+                    <span key={i} className="px-1.5 py-0.5 rounded text-[9px] bg-zinc-700/50 text-zinc-300">✓ {reason}</span>
+                  ))}
+                </div>
+                {r.execution.warnings.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mb-2">
+                    {r.execution.warnings.map((w, i) => (
+                      <span key={i} className="px-1.5 py-0.5 rounded text-[9px] bg-amber-900/20 text-amber-400">⚠ {w}</span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Checklist Toggle */}
+                <button onClick={() => setShowChecklist(!showChecklist)} className="text-[10px] text-violet-400 hover:text-violet-300 mb-2 underline">
+                  {showChecklist ? '▼ Hide' : '▶ Show'} Checklist ({r.execution.passedCount}/{r.execution.totalChecks})
+                </button>
+                {showChecklist && (
+                  <div className="rounded-lg bg-zinc-900/30 p-2 mb-3 space-y-0.5 max-h-52 overflow-y-auto">
+                    {r.execution.checklist.map(item => <ChecklistRow key={item.id} item={item} />)}
+                  </div>
+                )}
+
+                {/* Action Buttons */}
+                <div className="flex gap-2">
+                  <button onClick={() => logTrade('win')} disabled={liveRisk?.shouldStop} className="flex-1 py-2 rounded-lg text-xs font-bold bg-emerald-500 hover:bg-emerald-600 text-white transition-colors disabled:opacity-30">✅ Won</button>
+                  <button onClick={() => logTrade('loss')} disabled={liveRisk?.shouldStop} className="flex-1 py-2 rounded-lg text-xs font-bold bg-rose-500 hover:bg-rose-600 text-white transition-colors disabled:opacity-30">❌ Lost</button>
+                  <button onClick={() => logTrade('breakeven')} disabled={liveRisk?.shouldStop} className="py-2 px-3 rounded-lg text-xs font-bold bg-zinc-700 hover:bg-zinc-600 dark-mode-text transition-colors disabled:opacity-30">⚖ BE</button>
+                </div>
+              </div>
+            )}
+
+            {/* ▓▓ PENDING SETUPS (when WAIT) ▓▓ */}
+            {(r.masterDirection === 'WAIT' || liveRisk?.shouldStop) && r.unifiedSignal.pendingSetups.length > 0 && (
+              <div className="rounded-xl bg-zinc-900/30 p-2.5">
+                <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                  ⏳ Pending Setups ({r.unifiedSignal.pendingSetups.length})
+                </div>
+                <div className="space-y-2">
+                  {r.unifiedSignal.pendingSetups.map((setup: PendingSetup) => (
+                    <div key={setup.id} className={`rounded-lg p-2 ${
+                      setup.type === 'long' ? 'bg-emerald-900/15 ring-1 ring-emerald-800/30' : 'bg-rose-900/15 ring-1 ring-rose-800/30'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-[10px] font-black ${setup.type === 'long' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {setup.type === 'long' ? '🟢 LONG' : '🔴 SHORT'}
+                        </span>
+                        <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-zinc-800/50 text-zinc-300 font-bold">
+                          {setup.confidence}% conf
+                        </span>
+                        <span className="ml-auto text-[8px] text-zinc-500">R:R {setup.riskReward.toFixed(1)}</span>
+                      </div>
+                      <div className="text-[9px] text-zinc-300 mb-1">{setup.trigger}</div>
+                      <div className="grid grid-cols-4 gap-1 text-[8px]">
+                        <div className="text-center">
+                          <div className="text-zinc-500">Entry</div>
+                          <div className="font-mono font-bold text-zinc-300">{formatPrice(setup.entryZone.low)}–{formatPrice(setup.entryZone.high)}</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-rose-500">SL</div>
+                          <div className="font-mono font-bold text-rose-400">{formatPrice(setup.stopLoss)}</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-emerald-500">TP1</div>
+                          <div className="font-mono font-bold text-emerald-400">{formatPrice(setup.target1)}</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-emerald-600">TP2</div>
+                          <div className="font-mono font-bold text-emerald-500">{formatPrice(setup.target2)}</div>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {setup.reasons.map((r2, j) => (
+                          <span key={j} className="text-[7px] px-1 py-0.5 rounded bg-zinc-800/50 text-zinc-400">
+                            {r2}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="text-[7px] text-rose-400/60 mt-0.5">❌ Invalid: {setup.invalidation}</div>
                     </div>
                   ))}
-            </div>
-              )}
-
-            {/* Reasons */}
-            <div className="flex flex-wrap gap-1 mb-3">
-                {r.execution.reasons.map((reason, i) => (
-                <span key={i} className="px-1.5 py-0.5 rounded text-[9px] bg-white/60 dark:bg-zinc-700/50 text-zinc-600 dark:text-zinc-300">
-                    ✓ {reason}
-                </span>
-              ))}
-            </div>
-
-              {/* Warnings */}
-              {r.execution.warnings.length > 0 && (
-                <div className="flex flex-wrap gap-1 mb-3">
-                  {r.execution.warnings.map((w, i) => (
-                    <span key={i} className="px-1.5 py-0.5 rounded text-[9px] bg-amber-100/60 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400">
-                      ⚠ {w}
-                    </span>
-                  ))}
                 </div>
-              )}
+              </div>
+            )}
 
-              {/* Checklist Toggle */}
-              <button onClick={() => setShowChecklist(!showChecklist)} className="text-[10px] text-violet-400 hover:text-violet-300 mb-2 underline">
-                {showChecklist ? '▼ Hide' : '▶ Show'} Execution Checklist ({r.execution.passedCount}/{r.execution.totalChecks})
-              </button>
-              {showChecklist && (
-                <div className="rounded-lg bg-zinc-900/30 p-2 mb-3 space-y-0.5 max-h-52 overflow-y-auto">
-                  {r.execution.checklist.map(item => (
-                    <ChecklistRow key={item.id} item={item} />
-                  ))}
-                </div>
-              )}
+            {/* ▓▓ SIGNAL HISTORY ▓▓ */}
+            {signalHistory.length > 0 && (
+              <div className="rounded-xl bg-zinc-900/30 p-2.5">
+                <button onClick={() => setShowHistory(!showHistory)} className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 hover:text-zinc-300 w-full text-left">
+                  {showHistory ? '▼' : '▶'} Signal History ({signalHistory.length})
+                </button>
+                {showHistory && (
+                  <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
+                    {signalHistory.map((s, i) => (
+                      <div key={i} className={`flex items-center gap-2 text-[9px] py-0.5 ${s.expired ? 'opacity-40' : ''}`}>
+                        <span>{s.direction === 'LONG' ? '🟢' : '🔴'}</span>
+                        <span className={`font-bold ${s.direction === 'LONG' ? 'text-emerald-400' : 'text-rose-400'}`}>{s.direction}</span>
+                        <span className={`px-1 rounded text-[8px] ${gradeColor(s.grade)}`}>{s.grade}</span>
+                        <span className="font-mono text-zinc-400">{formatPrice(s.entry)}</span>
+                        <span className="text-zinc-500">→</span>
+                        <span className="font-mono text-emerald-400">{formatPrice(s.tp1)}</span>
+                        <span className="ml-auto text-[8px] text-zinc-600">{new Date(s.timestamp).toLocaleTimeString()}</span>
+                        {s.expired && <span className="text-[7px] text-zinc-600">expired</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
-              {/* Action Buttons */}
-            <div className="flex gap-2">
-              <button
-                  onClick={() => logTrade('win')}
-                  disabled={liveRisk?.shouldStop}
-                  className="flex-1 py-2 rounded-lg text-xs font-bold bg-emerald-500 hover:bg-emerald-600 text-white transition-colors disabled:opacity-30"
-                >
-                  ✅ Won
-              </button>
-              <button
-                  onClick={() => logTrade('loss')}
-                  disabled={liveRisk?.shouldStop}
-                  className="flex-1 py-2 rounded-lg text-xs font-bold bg-rose-500 hover:bg-rose-600 text-white transition-colors disabled:opacity-30"
-                >
-                  ❌ Lost
-              </button>
-              <button
-                  onClick={() => logTrade('breakeven')}
-                  disabled={liveRisk?.shouldStop}
-                  className="py-2 px-3 rounded-lg text-xs font-bold bg-zinc-200 dark:bg-zinc-700 hover:bg-zinc-300 dark:hover:bg-zinc-600 dark-mode-text transition-colors disabled:opacity-30"
-              >
-                ⚖ BE
-              </button>
-            </div>
-          </div>
+            {/* ▓▓ NO DATA STATE ▓▓ */}
+            {candles.length < 50 && (
+              <div className="text-center py-6">
+                <div className="text-2xl mb-2">📊</div>
+                <div className="text-sm text-zinc-500">Loading... ({candles.length}/50 candles)</div>
+              </div>
+            )}
           </div>
         ) : activeTab === 'signal' ? (
           <div className="text-center py-6">
-            <div className="text-2xl mb-2">{liveRisk?.shouldStop ? '⛔' : '👀'}</div>
-            <div className="text-sm text-zinc-400 dark:text-zinc-500 font-medium">
-              {candles.length < 50
-                ? `Loading... (${candles.length}/50 candles)`
-                : liveRisk?.shouldStop
-                ? 'Trading paused — risk limits reached'
-                : r?.masterDirection === 'WAIT'
-                ? 'No high-confluence setup found — WAIT'
-                : 'Scanning for opportunities...'}
+            <div className="text-2xl mb-2">📊</div>
+            <div className="text-sm text-zinc-500">
+              {candles.length < 50 ? `Loading... (${candles.length}/50 candles)` : 'Analyzing...'}
             </div>
-            {r && r.masterDirection === 'WAIT' && (
-              <div className="mt-3 space-y-1">
-                <ScoreBar value={r.orderFlow.score} label="Order Flow" />
-                <ScoreBar value={r.liquidity.score} label="Liquidity" />
-                <ScoreBar value={r.structure.score} label="Structure" />
-              </div>
-            )}
           </div>
         ) : null}
 

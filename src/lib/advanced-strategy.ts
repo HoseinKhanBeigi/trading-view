@@ -187,6 +187,81 @@ export type PartialTP = {
 
 // ─── Master Strategy Output ──────────────────────────────────────────────────
 
+// ─── Multi-Timeframe ─────────────────────────────────────────────────────────
+
+export type TimeframeBias = {
+  tf: string;                           // "1m" | "5m" | "15m" | "1h"
+  trend: 'bullish' | 'bearish' | 'neutral';
+  strength: number;                     // 0-100
+  ema9: number;
+  ema21: number;
+  rsi: number;
+  macdHist: number;
+  atr: number;
+};
+
+export type MultiTimeframeAnalysis = {
+  timeframes: TimeframeBias[];
+  alignment: 'aligned-bull' | 'aligned-bear' | 'mixed';
+  htfBias: 'bullish' | 'bearish' | 'neutral';  // higher-timeframe consensus
+  htfScore: number;                     // -100 to +100
+};
+
+// ─── Pending Setups ──────────────────────────────────────────────────────────
+
+export type PendingSetup = {
+  id: string;
+  type: 'long' | 'short';
+  trigger: string;                      // what needs to happen
+  entryZone: { low: number; high: number };
+  stopLoss: number;
+  target1: number;
+  target2: number;
+  riskReward: number;
+  confidence: number;                   // 0-100
+  reasons: string[];
+  invalidation: string;                 // what kills the setup
+};
+
+// ─── Unified Master Signal ───────────────────────────────────────────────────
+
+export type UnifiedSignal = {
+  direction: 'STRONG_LONG' | 'LONG' | 'LEAN_LONG' | 'NEUTRAL' | 'LEAN_SHORT' | 'SHORT' | 'STRONG_SHORT';
+  conviction: number;                   // 0-100
+  summary: string;                      // one-line human-readable summary
+  keyLevels: {
+    strongSupport: number;
+    nearSupport: number;
+    currentPrice: number;
+    nearResistance: number;
+    strongResistance: number;
+  };
+  pillarSummary: {
+    name: string;
+    status: 'bullish' | 'bearish' | 'neutral';
+    score: number;
+    detail: string;
+  }[];
+  actionAdvice: string;                 // "ENTER LONG at $X" or "WAIT for X"
+  pendingSetups: PendingSetup[];
+  mtfAlignment: MultiTimeframeAnalysis;
+};
+
+// ─── Signal History ──────────────────────────────────────────────────────────
+
+export type SignalHistoryEntry = {
+  timestamp: number;
+  direction: 'LONG' | 'SHORT' | 'WAIT';
+  grade: string;
+  price: number;
+  entry: number;
+  stopLoss: number;
+  tp1: number;
+  confluenceScore: number;
+  expired: boolean;
+  reason: string;
+};
+
 export type AdvancedStrategyResult = {
   timestamp: number;
   symbol: string;
@@ -199,6 +274,9 @@ export type AdvancedStrategyResult = {
   masterDirection: 'LONG' | 'SHORT' | 'WAIT';
   masterGrade: 'A+' | 'A' | 'B' | 'C' | 'NO-TRADE';
   confidence: number;                 // 0-100
+  // New unified outputs
+  unifiedSignal: UnifiedSignal;
+  mtf: MultiTimeframeAnalysis;
 };
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -1227,6 +1305,428 @@ export function analyzeRisk(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// PILLAR 6: MULTI-TIMEFRAME ANALYSIS (resample 1m candles)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function resampleCandles(candles: CandlestickData[], factor: number): CandlestickData[] {
+  if (factor <= 1 || candles.length < factor) return candles;
+  const resampled: CandlestickData[] = [];
+  for (let i = 0; i <= candles.length - factor; i += factor) {
+    const slice = candles.slice(i, i + factor);
+    const open = slice[0].open;
+    const close = slice[slice.length - 1].close;
+    const high = Math.max(...slice.map(c => c.high));
+    const low = Math.min(...slice.map(c => c.low));
+    const time = slice[slice.length - 1].time;
+    resampled.push({ open, high, low, close, time });
+  }
+  return resampled;
+}
+
+function analyzeTimeframeBias(candles: CandlestickData[], tf: string): TimeframeBias | null {
+  if (candles.length < 30) return null;
+  const ind = calculateIndicatorSnapshot(candles);
+  if (!ind) return null;
+
+  const priceAboveEma9 = candles[candles.length - 1].close > ind.ema9;
+  const priceAboveEma21 = candles[candles.length - 1].close > ind.ema21;
+  const ema9Above21 = ind.ema9 > ind.ema21;
+  const rsiBull = ind.rsi > 50;
+  const macdBull = ind.macd.histogram > 0;
+
+  let bullPoints = 0;
+  if (priceAboveEma9) bullPoints++;
+  if (priceAboveEma21) bullPoints++;
+  if (ema9Above21) bullPoints++;
+  if (rsiBull) bullPoints++;
+  if (macdBull) bullPoints++;
+
+  const trend: 'bullish' | 'bearish' | 'neutral' =
+    bullPoints >= 4 ? 'bullish' : bullPoints <= 1 ? 'bearish' : 'neutral';
+  const strength = Math.abs(bullPoints - 2.5) * 40; // 0-100
+
+  return {
+    tf,
+    trend,
+    strength: Math.min(100, strength),
+    ema9: ind.ema9,
+    ema21: ind.ema21,
+    rsi: ind.rsi,
+    macdHist: ind.macd.histogram,
+    atr: ind.atr,
+  };
+}
+
+function analyzeMultiTimeframe(candles: CandlestickData[]): MultiTimeframeAnalysis {
+  const timeframes: TimeframeBias[] = [];
+
+  // 1m = raw candles (already have this from main analysis)
+  const tf1m = analyzeTimeframeBias(candles, '1m');
+  if (tf1m) timeframes.push(tf1m);
+
+  // 5m = resample by 5
+  const candles5m = resampleCandles(candles, 5);
+  const tf5m = analyzeTimeframeBias(candles5m, '5m');
+  if (tf5m) timeframes.push(tf5m);
+
+  // 15m = resample by 15
+  const candles15m = resampleCandles(candles, 15);
+  const tf15m = analyzeTimeframeBias(candles15m, '15m');
+  if (tf15m) timeframes.push(tf15m);
+
+  // 1h = resample by 60
+  const candles1h = resampleCandles(candles, 60);
+  const tf1h = analyzeTimeframeBias(candles1h, '1h');
+  if (tf1h) timeframes.push(tf1h);
+
+  // Determine alignment
+  const bullCount = timeframes.filter(t => t.trend === 'bullish').length;
+  const bearCount = timeframes.filter(t => t.trend === 'bearish').length;
+  const total = timeframes.length;
+
+  const alignment: 'aligned-bull' | 'aligned-bear' | 'mixed' =
+    bullCount >= total * 0.75 ? 'aligned-bull'
+    : bearCount >= total * 0.75 ? 'aligned-bear'
+    : 'mixed';
+
+  // HTF bias (weight higher TFs more)
+  const tfWeights: Record<string, number> = { '1m': 0.1, '5m': 0.2, '15m': 0.3, '1h': 0.4 };
+  let htfScore = 0;
+  let totalWeight = 0;
+  for (const tf of timeframes) {
+    const w = tfWeights[tf.tf] ?? 0.1;
+    const score = tf.trend === 'bullish' ? tf.strength : tf.trend === 'bearish' ? -tf.strength : 0;
+    htfScore += score * w;
+    totalWeight += w;
+  }
+  if (totalWeight > 0) htfScore /= totalWeight;
+
+  const htfBias: 'bullish' | 'bearish' | 'neutral' =
+    htfScore > 20 ? 'bullish' : htfScore < -20 ? 'bearish' : 'neutral';
+
+  return { timeframes, alignment, htfBias, htfScore };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PENDING SETUPS GENERATOR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function generatePendingSetups(
+  candles: CandlestickData[],
+  orderFlow: OrderFlowAnalysis,
+  liquidity: LiquidityAnalysis,
+  structure: MarketStructureAnalysis,
+  mtf: MultiTimeframeAnalysis,
+  currentPrice: number,
+  atr: number,
+): PendingSetup[] {
+  const setups: PendingSetup[] = [];
+  const slBuffer = atr * 0.2;
+
+  // ── Setup 1: Long on support bounce ──
+  if (liquidity.nearestSupport && liquidity.nearestSupport.midPrice < currentPrice) {
+    const support = liquidity.nearestSupport;
+    const entryLow = support.midPrice;
+    const entryHigh = support.midPrice + atr * 0.3;
+    const sl = support.priceLow - slBuffer;
+    const risk = entryLow - sl;
+    const tp1 = entryLow + risk * 2;
+    const tp2 = entryLow + risk * 3.5;
+
+    let conf = 30;
+    if (structure.phase === 'accumulation' || structure.phase === 'markup') conf += 15;
+    if (mtf.htfBias === 'bullish') conf += 20;
+    if (orderFlow.cvdTrend === 'rising') conf += 10;
+    if (support.strength > 70) conf += 10;
+    conf = Math.min(95, conf);
+
+    const reasons: string[] = [`Support at ${entryLow.toFixed(1)} (strength ${support.strength})`];
+    if (structure.phase === 'accumulation') reasons.push('Accumulation phase');
+    if (mtf.htfBias === 'bullish') reasons.push('HTF bullish');
+    if (orderFlow.cvdTrend === 'rising') reasons.push('CVD rising');
+
+    setups.push({
+      id: 'long-support-bounce',
+      type: 'long',
+      trigger: `Price touches support zone ${entryLow.toFixed(1)}–${entryHigh.toFixed(1)} with bullish reaction`,
+      entryZone: { low: entryLow, high: entryHigh },
+      stopLoss: sl,
+      target1: tp1,
+      target2: tp2,
+      riskReward: risk > 0 ? (tp1 - entryLow) / risk : 0,
+      confidence: conf,
+      reasons,
+      invalidation: `Break below ${sl.toFixed(1)}`,
+    });
+  }
+
+  // ── Setup 2: Short on resistance rejection ──
+  if (liquidity.nearestResistance && liquidity.nearestResistance.midPrice > currentPrice) {
+    const resist = liquidity.nearestResistance;
+    const entryHigh = resist.midPrice;
+    const entryLow = resist.midPrice - atr * 0.3;
+    const sl = resist.priceHigh + slBuffer;
+    const risk = sl - entryHigh;
+    const tp1 = entryHigh - risk * 2;
+    const tp2 = entryHigh - risk * 3.5;
+
+    let conf = 30;
+    if (structure.phase === 'distribution' || structure.phase === 'markdown') conf += 15;
+    if (structure.trend === 'bearish') conf += 10;
+    if (mtf.htfBias === 'bearish') conf += 20;
+    if (orderFlow.cvdTrend === 'falling') conf += 10;
+    if (resist.strength > 70) conf += 10;
+    conf = Math.min(95, conf);
+
+    const reasons: string[] = [`Resistance at ${entryHigh.toFixed(1)} (strength ${resist.strength})`];
+    if (structure.trend === 'bearish') reasons.push('Bearish structure');
+    if (mtf.htfBias === 'bearish') reasons.push('HTF bearish');
+    if (orderFlow.cvdTrend === 'falling') reasons.push('CVD falling');
+
+    setups.push({
+      id: 'short-resistance-reject',
+      type: 'short',
+      trigger: `Price reaches resistance zone ${entryLow.toFixed(1)}–${entryHigh.toFixed(1)} with bearish reaction`,
+      entryZone: { low: entryLow, high: entryHigh },
+      stopLoss: sl,
+      target1: tp1,
+      target2: tp2,
+      riskReward: risk > 0 ? (entryHigh - tp1) / risk : 0,
+      confidence: conf,
+      reasons,
+      invalidation: `Break above ${sl.toFixed(1)}`,
+    });
+  }
+
+  // ── Setup 3: FVG fill long ──
+  const fvgPOIs = structure.pointsOfInterest.filter(p => p.type === 'fvg');
+  const bullFvgPOIs = fvgPOIs.filter((p: PointOfInterest) => p.price < currentPrice && p.direction === 'bullish');
+  if (bullFvgPOIs.length > 0) {
+    const nearest = bullFvgPOIs.reduce((a: PointOfInterest, b: PointOfInterest) =>
+      Math.abs(a.price - currentPrice) < Math.abs(b.price - currentPrice) ? a : b
+    );
+    const entryMid = nearest.price;
+    const entryLow = entryMid - atr * 0.3;
+    const entryHigh = entryMid + atr * 0.3;
+    const sl = entryLow - atr * 0.5;
+    const risk = entryMid - sl;
+    const tp1 = entryHigh + risk * 2;
+    const tp2 = entryHigh + risk * 4;
+
+    let conf = 35;
+    if (mtf.htfBias === 'bullish') conf += 20;
+    if (structure.trend === 'bullish') conf += 10;
+    if (orderFlow.cvdTrend === 'rising') conf += 10;
+    conf = Math.min(90, conf);
+
+    setups.push({
+      id: 'long-fvg-fill',
+      type: 'long',
+      trigger: `Price fills FVG at ${entryLow.toFixed(1)}–${entryHigh.toFixed(1)}`,
+      entryZone: { low: entryLow, high: entryHigh },
+      stopLoss: sl,
+      target1: tp1,
+      target2: tp2,
+      riskReward: risk > 0 ? (tp1 - entryHigh) / risk : 0,
+      confidence: conf,
+      reasons: [`FVG at ${entryMid.toFixed(1)}`, `Strength: ${nearest.strength}`, 'Mean reversion entry'],
+      invalidation: `Price breaks below ${sl.toFixed(1)} without reaction`,
+    });
+  }
+
+  // ── Setup 4: FVG fill short ──
+  const bearFvgPOIs = fvgPOIs.filter((p: PointOfInterest) => p.price > currentPrice && p.direction === 'bearish');
+  if (bearFvgPOIs.length > 0) {
+    const nearest = bearFvgPOIs.reduce((a: PointOfInterest, b: PointOfInterest) =>
+      Math.abs(a.price - currentPrice) < Math.abs(b.price - currentPrice) ? a : b
+    );
+    const entryMid = nearest.price;
+    const entryLow = entryMid - atr * 0.3;
+    const entryHigh = entryMid + atr * 0.3;
+    const sl = entryHigh + atr * 0.5;
+    const risk = sl - entryMid;
+    const tp1 = entryLow - risk * 2;
+    const tp2 = entryLow - risk * 4;
+
+    let conf = 35;
+    if (mtf.htfBias === 'bearish') conf += 20;
+    if (structure.trend === 'bearish') conf += 10;
+    if (orderFlow.cvdTrend === 'falling') conf += 10;
+    conf = Math.min(90, conf);
+
+    setups.push({
+      id: 'short-fvg-fill',
+      type: 'short',
+      trigger: `Price fills FVG at ${entryLow.toFixed(1)}–${entryHigh.toFixed(1)}`,
+      entryZone: { low: entryLow, high: entryHigh },
+      stopLoss: sl,
+      target1: tp1,
+      target2: tp2,
+      riskReward: risk > 0 ? (entryLow - tp1) / risk : 0,
+      confidence: conf,
+      reasons: [`FVG at ${entryMid.toFixed(1)}`, `Strength: ${nearest.strength}`, 'Mean reversion short'],
+      invalidation: `Price breaks above ${sl.toFixed(1)}`,
+    });
+  }
+
+  // ── Setup 5: Structure break continuation ──
+  if (structure.mssDetected) {
+    const isBullMss = structure.mssDirection === 'bullish';
+    const entryPrice = currentPrice;
+    const sl = isBullMss
+      ? entryPrice - atr * 1.2
+      : entryPrice + atr * 1.2;
+    const risk = Math.abs(entryPrice - sl);
+    const tp1 = isBullMss ? entryPrice + risk * 2 : entryPrice - risk * 2;
+    const tp2 = isBullMss ? entryPrice + risk * 3.5 : entryPrice - risk * 3.5;
+
+    let conf = 40;
+    if (mtf.alignment === (isBullMss ? 'aligned-bull' : 'aligned-bear')) conf += 25;
+    if ((isBullMss && orderFlow.netFlow === 'buying') || (!isBullMss && orderFlow.netFlow === 'selling')) conf += 15;
+    conf = Math.min(95, conf);
+
+    setups.push({
+      id: `${isBullMss ? 'long' : 'short'}-mss-continuation`,
+      type: isBullMss ? 'long' : 'short',
+      trigger: `MSS ${structure.mssDirection} confirmed — enter on pullback`,
+      entryZone: { low: isBullMss ? entryPrice - atr * 0.3 : entryPrice, high: isBullMss ? entryPrice : entryPrice + atr * 0.3 },
+      stopLoss: sl,
+      target1: tp1,
+      target2: tp2,
+      riskReward: risk > 0 ? Math.abs(tp1 - entryPrice) / risk : 0,
+      confidence: conf,
+      reasons: [`MSS ${structure.mssDirection}`, 'Structure shift entry'],
+      invalidation: `Price invalidates MSS below ${sl.toFixed(1)}`,
+    });
+  }
+
+  // Sort by confidence desc
+  setups.sort((a, b) => b.confidence - a.confidence);
+  return setups.slice(0, 5); // max 5 setups
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UNIFIED SIGNAL BUILDER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function buildUnifiedSignal(
+  currentPrice: number,
+  orderFlow: OrderFlowAnalysis,
+  liquidity: LiquidityAnalysis,
+  structure: MarketStructureAnalysis,
+  execution: ExecutionAnalysis,
+  risk: RiskAnalysis,
+  mtf: MultiTimeframeAnalysis,
+  masterScore: number,
+  masterDirection: 'LONG' | 'SHORT' | 'WAIT',
+  confidence: number,
+  pendingSetups: PendingSetup[],
+  atr: number,
+): UnifiedSignal {
+  // ── Direction with nuance ──
+  let direction: UnifiedSignal['direction'] = 'NEUTRAL';
+  if (masterDirection === 'LONG' && confidence >= 70) direction = 'STRONG_LONG';
+  else if (masterDirection === 'LONG' && confidence >= 50) direction = 'LONG';
+  else if (masterScore > 10) direction = 'LEAN_LONG';
+  else if (masterDirection === 'SHORT' && confidence >= 70) direction = 'STRONG_SHORT';
+  else if (masterDirection === 'SHORT' && confidence >= 50) direction = 'SHORT';
+  else if (masterScore < -10) direction = 'LEAN_SHORT';
+  else direction = 'NEUTRAL';
+
+  // ── Conviction (refined confidence) ──
+  let conviction = confidence;
+  if (mtf.alignment === 'aligned-bull' && masterScore > 0) conviction = Math.min(100, conviction + 10);
+  else if (mtf.alignment === 'aligned-bear' && masterScore < 0) conviction = Math.min(100, conviction + 10);
+  else if (mtf.alignment === 'mixed') conviction = Math.max(0, conviction - 10);
+
+  // ── Key levels ──
+  const supportZones = liquidity.zones.filter(z => z.midPrice < currentPrice).sort((a, b) => b.midPrice - a.midPrice);
+  const resistZones = liquidity.zones.filter(z => z.midPrice > currentPrice).sort((a, b) => a.midPrice - b.midPrice);
+
+  const keyLevels = {
+    strongSupport: supportZones.length > 1 ? supportZones[1].midPrice : currentPrice - atr * 3,
+    nearSupport: supportZones.length > 0 ? supportZones[0].midPrice : currentPrice - atr * 1.5,
+    currentPrice,
+    nearResistance: resistZones.length > 0 ? resistZones[0].midPrice : currentPrice + atr * 1.5,
+    strongResistance: resistZones.length > 1 ? resistZones[1].midPrice : currentPrice + atr * 3,
+  };
+
+  // ── Pillar summary ──
+  const pillarSummary = [
+    {
+      name: 'Order Flow',
+      status: (orderFlow.score > 15 ? 'bullish' : orderFlow.score < -15 ? 'bearish' : 'neutral') as 'bullish' | 'bearish' | 'neutral',
+      score: orderFlow.score,
+      detail: `CVD ${orderFlow.cvdTrend}, ${orderFlow.netFlow} flow, ${orderFlow.buyPressure.toFixed(0)}/${orderFlow.sellPressure.toFixed(0)} pressure`,
+    },
+    {
+      name: 'Liquidity',
+      status: (liquidity.score > 15 ? 'bullish' : liquidity.score < -15 ? 'bearish' : 'neutral') as 'bullish' | 'bearish' | 'neutral',
+      score: liquidity.score,
+      detail: `Sup: ${keyLevels.nearSupport.toFixed(1)} | Res: ${keyLevels.nearResistance.toFixed(1)} | ${liquidity.zones.length} zones`,
+    },
+    {
+      name: 'Structure',
+      status: (structure.trend === 'bullish' ? 'bullish' : structure.trend === 'bearish' ? 'bearish' : 'neutral') as 'bullish' | 'bearish' | 'neutral',
+      score: structure.score,
+      detail: `${structure.trend} (${structure.trendStrength.toFixed(0)}%) • ${structure.phase} • ${structure.premiumDiscount}`,
+    },
+    {
+      name: 'MTF Alignment',
+      status: (mtf.htfBias === 'bullish' ? 'bullish' : mtf.htfBias === 'bearish' ? 'bearish' : 'neutral') as 'bullish' | 'bearish' | 'neutral',
+      score: mtf.htfScore,
+      detail: `${mtf.alignment} • ${mtf.timeframes.map(t => `${t.tf}:${t.trend[0].toUpperCase()}`).join(' ')}`,
+    },
+    {
+      name: 'Risk',
+      status: (risk.heatIndex < 30 ? 'bullish' : risk.heatIndex > 60 ? 'bearish' : 'neutral') as 'bullish' | 'bearish' | 'neutral',
+      score: 50 - risk.heatIndex,
+      detail: `Heat: ${risk.heatIndex.toFixed(0)} | WR: ${risk.recentWinRate.toFixed(0)}% | DD: ${risk.drawdownCurrent.toFixed(1)}%`,
+    },
+  ];
+
+  // ── Summary text ──
+  let summary: string;
+  if (masterDirection !== 'WAIT') {
+    summary = `${execution.setupGrade} ${masterDirection} — ${execution.confluenceScore.toFixed(0)}% confluence, ${conviction.toFixed(0)}% conviction`;
+  } else {
+    const leanDir = masterScore > 5 ? 'bullish' : masterScore < -5 ? 'bearish' : 'neutral';
+    const bestSetup = pendingSetups.length > 0 ? pendingSetups[0] : null;
+    if (bestSetup) {
+      summary = `Leaning ${leanDir} — Best pending: ${bestSetup.type.toUpperCase()} at ${bestSetup.entryZone.low.toFixed(1)}–${bestSetup.entryZone.high.toFixed(1)} (${bestSetup.confidence}% conf)`;
+    } else {
+      summary = `No setup — market ${leanDir}, ${mtf.alignment} across timeframes`;
+    }
+  }
+
+  // ── Action advice ──
+  let actionAdvice: string;
+  if (risk.shouldStop) {
+    actionAdvice = '⛔ STOP TRADING — Risk limits reached. Step away.';
+  } else if (masterDirection === 'LONG') {
+    actionAdvice = `🟢 ENTER LONG at ${execution.entry.toFixed(1)} | SL: ${execution.stopLoss.toFixed(1)} | TP1: ${execution.takeProfit1.toFixed(1)} | R:R ${execution.riskReward.toFixed(1)}`;
+  } else if (masterDirection === 'SHORT') {
+    actionAdvice = `🔴 ENTER SHORT at ${execution.entry.toFixed(1)} | SL: ${execution.stopLoss.toFixed(1)} | TP1: ${execution.takeProfit1.toFixed(1)} | R:R ${execution.riskReward.toFixed(1)}`;
+  } else if (pendingSetups.length > 0) {
+    const best = pendingSetups[0];
+    actionAdvice = `⏳ WAIT — Set alert at ${best.entryZone.low.toFixed(1)}–${best.entryZone.high.toFixed(1)} for ${best.type.toUpperCase()} setup`;
+  } else {
+    actionAdvice = '👀 WAIT — No high-probability setup. Protect capital.';
+  }
+
+  return {
+    direction,
+    conviction,
+    summary,
+    keyLevels,
+    pillarSummary,
+    actionAdvice,
+    pendingSetups,
+    mtfAlignment: mtf,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // MASTER STRATEGY ORCHESTRATOR
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1265,13 +1765,18 @@ export function runAdvancedStrategy(
   const execution = analyzeExecution(candles, indicators, orderFlow, liquidity, structure, config);
   const risk = analyzeRisk(execution, config, tradeHistory);
 
-  // ── Master Score ──
+  // ── Multi-Timeframe Analysis ──
+  const mtf = analyzeMultiTimeframe(candles);
+
+  // ── Master Score (now includes MTF) ──
+  const mtfBonus = mtf.htfScore * 0.15; // add 15% weight for MTF alignment
   const masterScore =
     orderFlow.score * config.weights.orderFlow +
     liquidity.score * config.weights.liquidity +
     structure.score * config.weights.structure +
-    (execution.confluenceScore - 50) * config.weights.execution + // normalize around 0
-    (50 - risk.heatIndex) * config.weights.risk; // lower heat = better
+    (execution.confluenceScore - 50) * config.weights.execution +
+    (50 - risk.heatIndex) * config.weights.risk +
+    mtfBonus;
 
   // ── Master Direction ──
   let masterDirection: 'LONG' | 'SHORT' | 'WAIT' = execution.direction;
@@ -1283,12 +1788,29 @@ export function runAdvancedStrategy(
   let masterGrade = execution.setupGrade;
   if (masterDirection === 'WAIT') masterGrade = 'NO-TRADE';
 
-  // ── Confidence ──
-  const confidence = Math.max(0, Math.min(100,
-    execution.confluenceScore * 0.5 +
-    (100 - risk.heatIndex) * 0.2 +
-    Math.abs(masterScore) * 0.3
+  // ── Confidence (now includes MTF) ──
+  let confidence = Math.max(0, Math.min(100,
+    execution.confluenceScore * 0.4 +
+    (100 - risk.heatIndex) * 0.15 +
+    Math.abs(masterScore) * 0.25 +
+    (mtf.alignment === 'aligned-bull' || mtf.alignment === 'aligned-bear' ? 20 : 0)
   ));
+
+  // Reduce confidence if MTF conflicts with direction
+  if (masterDirection === 'LONG' && mtf.htfBias === 'bearish') confidence *= 0.7;
+  if (masterDirection === 'SHORT' && mtf.htfBias === 'bullish') confidence *= 0.7;
+
+  // ── Pending Setups ──
+  const currentPrice = candles[candles.length - 1].close;
+  const pendingSetups = generatePendingSetups(
+    candles, orderFlow, liquidity, structure, mtf, currentPrice, indicators.atr
+  );
+
+  // ── Unified Signal ──
+  const unifiedSignal = buildUnifiedSignal(
+    currentPrice, orderFlow, liquidity, structure, execution, risk,
+    mtf, masterScore, masterDirection, confidence, pendingSetups, indicators.atr
+  );
 
   return {
     timestamp: Date.now(),
@@ -1302,6 +1824,8 @@ export function runAdvancedStrategy(
     masterDirection,
     masterGrade,
     confidence,
+    unifiedSignal,
+    mtf,
   };
 }
 
