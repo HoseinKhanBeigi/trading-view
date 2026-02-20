@@ -7,7 +7,7 @@ import OrdersList from "@/components/OrdersList";
 import FuturesTicket from "@/components/FuturesTicket";
 import PositionsPanel from "@/components/PositionsPanel";
 import OrdersTable from "@/components/OrdersTable";
-import TradingChat from "@/components/TradingChat";
+
 import QuantPanel from "@/components/QuantPanel";
 import ScalpDashboard from "@/components/ScalpDashboard";
 import { useMarketStore } from "@/store";
@@ -45,7 +45,7 @@ export default function SymbolPage() {
           <ScalpDashboard />
           <OrderBookPanel />
           <PositionsPanel />
-          <TradingChat />
+
         </div>
       </div>
     </div>
