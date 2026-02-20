@@ -21,6 +21,10 @@ import {
   getPropPreset,
 } from "@/lib/advanced-strategy";
 import type { ShadowPattern, ShadowClusterZone, StopHuntEvent, ShadowAnalysisResult } from "@/lib/shadow-analysis";
+import type { AMDAnalysisResult, AMDPhase, AMDEntrySignal, FourHourRoadmap, ManipulationEvent } from "@/lib/amd-strategy";
+import type { FractalAnalysisResult, FractalPoint, FractalLevel, FractalBreakout, AlligatorState, FractalDimension } from "@/lib/fractal-analysis";
+import type { FloorCeilingAnalysis, FloorCeilingLevel, TimeframeFloorCeiling, ConfluentLevel, HTFCandleMap } from "@/lib/floor-ceiling";
+import { fetchKlines, type BinanceInterval } from "@/lib/binance";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -118,9 +122,54 @@ export default function ScalpDashboard() {
   const [showConfig, setShowConfig] = useState(false);
   const [showChecklist, setShowChecklist] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [activeTab, setActiveTab] = useState<'signal' | 'flow' | 'liquidity' | 'structure' | 'risk' | 'shadows' | 'prop'>('signal');
+  const [activeTab, setActiveTab] = useState<'signal' | 'flow' | 'liquidity' | 'structure' | 'risk' | 'shadows' | 'amd' | 'fractals' | 'levels' | 'prop'>('signal');
   const lastUpdateRef = useRef(0);
   const lastSignalDirRef = useRef<string>('WAIT');
+
+  // ── HTF (Higher Timeframe) candle data for floor/ceiling analysis ──
+  const [htfCandles, setHtfCandles] = useState<HTFCandleMap>({});
+  const htfFetchRef = useRef<string>(''); // tracks symbol to avoid duplicate fetches
+  const htfTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Fetch 30m, 1h, 4h candles from Binance when symbol changes or every 60s
+  useEffect(() => {
+    if (!symbol) return;
+
+    const HTF_INTERVALS: BinanceInterval[] = ['30m', '1h', '4h'];
+
+    async function fetchHTFCandles() {
+      try {
+        const results: HTFCandleMap = {};
+        const fetches = HTF_INTERVALS.map(async (tf) => {
+          const data = await fetchKlines(symbol, tf, 300);
+          // Convert to CandlestickData shape
+          results[tf] = data.map(k => ({
+            time: k.time as any,
+            open: k.open,
+            high: k.high,
+            low: k.low,
+            close: k.close,
+          }));
+        });
+        await Promise.all(fetches);
+        setHtfCandles(results);
+        htfFetchRef.current = symbol;
+      } catch (err) {
+        console.error('Failed to fetch HTF candles:', err);
+      }
+    }
+
+    // Fetch immediately on symbol change
+    if (htfFetchRef.current !== symbol) {
+      fetchHTFCandles();
+    }
+
+    // Refresh every 60 seconds
+    htfTimerRef.current = setInterval(fetchHTFCandles, 60_000);
+    return () => {
+      if (htfTimerRef.current) clearInterval(htfTimerRef.current);
+    };
+  }, [symbol]);
 
   // Build a minimal OrderBook from depth data
   const orderBook = useMemo(() => {
@@ -141,7 +190,7 @@ export default function ScalpDashboard() {
     lastUpdateRef.current = now;
 
     const strategyResult = runAdvancedStrategy(
-      candles, trades, orderBook, tradeHistory, config, symbol
+      candles, trades, orderBook, tradeHistory, config, symbol, interval, htfCandles
     );
     if (strategyResult) {
       setResult(strategyResult);
@@ -169,7 +218,7 @@ export default function ScalpDashboard() {
       }
       lastSignalDirRef.current = newDir;
     }
-  }, [candles, trades, orderBook, tradeHistory, config, symbol, interval]);
+  }, [candles, trades, orderBook, tradeHistory, config, symbol, interval, htfCandles]);
 
   // Log a trade
   const logTrade = useCallback((res: 'win' | 'loss' | 'breakeven') => {
@@ -416,6 +465,9 @@ export default function ScalpDashboard() {
           { id: 'structure' as const, label: '🏗 Structure', emoji: '' },
           { id: 'risk' as const, label: '🛡 Risk', emoji: '' },
           { id: 'shadows' as const, label: '🕯 Shadows', emoji: '' },
+          { id: 'amd' as const, label: '⏱ AMD', emoji: '' },
+          { id: 'fractals' as const, label: '📐 Fractals', emoji: '' },
+          { id: 'levels' as const, label: '🏠 Levels', emoji: '' },
           { id: 'prop' as const, label: '🏦 Prop', emoji: '' },
         ].map(tab => (
           <button
@@ -1643,6 +1695,897 @@ export default function ScalpDashboard() {
                 <div className="text-sm text-zinc-500">Calculating prop compliance...</div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── AMD TAB ── */}
+        {activeTab === 'amd' && r && (
+          <div className="space-y-3">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-2">⏱ AMD — 4H Roadmap + 5min Entry</div>
+
+            {/* ▓▓ PHASE BANNER ▓▓ */}
+            <div className={`rounded-xl p-3 text-center ${
+              r.amd.phase === 'accumulation'
+                ? 'bg-gradient-to-r from-blue-950/60 to-blue-900/30 ring-1 ring-blue-500/40'
+                : r.amd.phase === 'manipulation'
+                ? 'bg-gradient-to-r from-amber-950/60 to-amber-900/30 ring-1 ring-amber-500/40'
+                : r.amd.phase === 'distribution'
+                ? 'bg-gradient-to-r from-violet-950/60 to-violet-900/30 ring-1 ring-violet-500/40'
+                : 'bg-gradient-to-r from-zinc-900/60 to-zinc-800/30 ring-1 ring-zinc-700/40'
+            }`}>
+              <div className="text-[10px] font-bold tracking-wider uppercase mb-1 text-zinc-400">
+                Current Phase
+              </div>
+              <div className={`text-lg font-black ${
+                r.amd.phase === 'accumulation' ? 'text-blue-400'
+                : r.amd.phase === 'manipulation' ? 'text-amber-400'
+                : r.amd.phase === 'distribution' ? 'text-violet-400'
+                : 'text-zinc-400'
+              }`}>
+                {r.amd.phase === 'accumulation' ? '📦 ACCUMULATION'
+                : r.amd.phase === 'manipulation' ? '⚡ MANIPULATION'
+                : r.amd.phase === 'distribution' ? '🚀 DISTRIBUTION'
+                : '👁 WATCHING'}
+              </div>
+              <div className="text-[9px] text-zinc-500 mt-1">{r.amd.phaseTiming}</div>
+              {/* Phase progress bar */}
+              <div className="mt-2 h-2 bg-zinc-800/60 rounded-full overflow-hidden">
+                <div className="h-full flex">
+                  <div
+                    className="bg-blue-500/70 transition-all"
+                    style={{ width: `${Math.min(r.amd.phaseProgress, 30)}%` }}
+                    title="Accumulation"
+                  />
+                  <div
+                    className="bg-amber-500/70 transition-all"
+                    style={{ width: `${Math.max(0, Math.min(r.amd.phaseProgress - 30, 25))}%` }}
+                    title="Manipulation"
+                  />
+                  <div
+                    className="bg-violet-500/70 transition-all"
+                    style={{ width: `${Math.max(0, r.amd.phaseProgress - 55)}%` }}
+                    title="Distribution"
+                  />
+                </div>
+              </div>
+              <div className="flex justify-between text-[7px] text-zinc-600 mt-0.5 px-1">
+                <span>Accum</span>
+                <span>Manip</span>
+                <span>Distrib</span>
+              </div>
+            </div>
+
+            {/* ▓▓ SESSION WINDOW ▓▓ */}
+            <div className={`rounded-lg p-2 flex items-center gap-2 ${
+              r.amd.session.quality === 'premium' ? 'bg-emerald-900/20 ring-1 ring-emerald-800/30'
+              : r.amd.session.quality === 'good' ? 'bg-blue-900/20 ring-1 ring-blue-800/30'
+              : r.amd.session.quality === 'fair' ? 'bg-zinc-800/30 ring-1 ring-zinc-700/20'
+              : 'bg-zinc-800/20 ring-1 ring-zinc-700/15'
+            }`}>
+              <span className="text-sm">
+                {r.amd.session.quality === 'premium' ? '🔥' : r.amd.session.quality === 'good' ? '⚡' : r.amd.session.quality === 'fair' ? '🌙' : '💤'}
+              </span>
+              <div>
+                <div className="text-[10px] font-bold dark-mode-text">{r.amd.session.name}</div>
+                <div className="text-[8px] text-zinc-500">{r.amd.session.description}</div>
+              </div>
+              <span className={`ml-auto text-[8px] px-2 py-0.5 rounded-full font-bold ${
+                r.amd.session.quality === 'premium' ? 'bg-emerald-500/20 text-emerald-400'
+                : r.amd.session.quality === 'good' ? 'bg-blue-500/20 text-blue-400'
+                : r.amd.session.quality === 'fair' ? 'bg-zinc-500/20 text-zinc-400'
+                : 'bg-zinc-800/50 text-zinc-500'
+              }`}>
+                {r.amd.session.quality.toUpperCase()}
+              </span>
+            </div>
+
+            {/* ▓▓ 4H ROADMAP ▓▓ */}
+            <div className="rounded-xl bg-zinc-900/30 p-2.5">
+              <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                🗺️ 4H Roadmap — Key Levels
+              </div>
+              {/* Visual 4H level map */}
+              <div className="relative mx-auto" style={{ height: 120, maxWidth: 280 }}>
+                {/* Previous 4H candle high */}
+                <div className="absolute left-0 right-0 flex items-center gap-2" style={{ top: 0 }}>
+                  <div className="h-px flex-1 bg-rose-500/60 border-t border-dashed border-rose-500/40" />
+                  <span className="text-[8px] font-mono text-rose-400 whitespace-nowrap">
+                    Prev 4H High: {formatPrice(r.amd.roadmap.keyLevels.prevHigh)}
+                  </span>
+                </div>
+                {/* Previous 4H mid */}
+                <div className="absolute left-0 right-0 flex items-center gap-2" style={{ top: 40 }}>
+                  <div className="h-px flex-1 bg-zinc-500/40 border-t border-dashed border-zinc-500/30" />
+                  <span className="text-[8px] font-mono text-zinc-400 whitespace-nowrap">
+                    Prev 4H Mid: {formatPrice(r.amd.roadmap.keyLevels.prevMid)}
+                  </span>
+                </div>
+                {/* Current price marker */}
+                <div className="absolute left-0 right-0 flex items-center gap-2" style={{ top: 60 }}>
+                  <div className="h-0.5 flex-1 bg-yellow-400/60" />
+                  <span className="text-[8px] font-mono text-yellow-400 font-bold whitespace-nowrap">
+                    ► Now: {formatPrice(r.amd.roadmap.current.close)}
+                  </span>
+                </div>
+                {/* Previous 4H candle low */}
+                <div className="absolute left-0 right-0 flex items-center gap-2" style={{ top: 100 }}>
+                  <div className="h-px flex-1 bg-emerald-500/60 border-t border-dashed border-emerald-500/40" />
+                  <span className="text-[8px] font-mono text-emerald-400 whitespace-nowrap">
+                    Prev 4H Low: {formatPrice(r.amd.roadmap.keyLevels.prevLow)}
+                  </span>
+                </div>
+              </div>
+
+              {/* 4H Stats Grid */}
+              <div className="grid grid-cols-3 gap-2 mt-3">
+                <div className="rounded-lg bg-zinc-800/40 p-1.5 text-center">
+                  <div className="text-[7px] text-zinc-500 uppercase">Prev 4H Bias</div>
+                  <div className={`text-[10px] font-bold ${
+                    r.amd.roadmap.bias4H === 'bullish' ? 'text-emerald-400'
+                    : r.amd.roadmap.bias4H === 'bearish' ? 'text-rose-400'
+                    : 'text-zinc-400'
+                  }`}>
+                    {r.amd.roadmap.bias4H === 'bullish' ? '🟢 Bullish'
+                    : r.amd.roadmap.bias4H === 'bearish' ? '🔴 Bearish'
+                    : '⚪ Neutral'}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-zinc-800/40 p-1.5 text-center">
+                  <div className="text-[7px] text-zinc-500 uppercase">4H Range</div>
+                  <div className="text-[10px] font-mono font-bold dark-mode-text">
+                    {formatPrice(r.amd.roadmap.prevRange)}
+                  </div>
+                  {r.amd.roadmap.isExpanded && (
+                    <div className="text-[6px] text-amber-400">EXPANDED</div>
+                  )}
+                </div>
+                <div className="rounded-lg bg-zinc-800/40 p-1.5 text-center">
+                  <div className="text-[7px] text-zinc-500 uppercase">4H Progress</div>
+                  <div className="text-[10px] font-mono font-bold dark-mode-text">
+                    {r.amd.phaseProgress.toFixed(0)}%
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* ▓▓ ACCUMULATION ZONE ▓▓ */}
+            {r.amd.accumulation.detected && (
+              <div className="rounded-xl bg-blue-900/10 ring-1 ring-blue-800/25 p-2.5">
+                <div className="text-[8px] uppercase font-bold tracking-wider text-blue-400 mb-1.5">
+                  📦 Accumulation Zone Detected
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="text-center">
+                    <div className="text-[7px] text-zinc-500">Range</div>
+                    <div className="text-[9px] font-mono dark-mode-text">
+                      {formatPrice(r.amd.accumulation.low)} – {formatPrice(r.amd.accumulation.high)}
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-[7px] text-zinc-500">Width (% of 4H)</div>
+                    <div className="text-[9px] font-mono font-bold text-blue-400">
+                      {r.amd.accumulation.rangePct.toFixed(1)}%
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-[7px] text-zinc-500">Tightness</div>
+                    <div className="flex items-center justify-center gap-1">
+                      <div className="w-12 h-1.5 bg-zinc-800/60 rounded-full overflow-hidden">
+                        <div className="h-full bg-blue-500 rounded-full" style={{ width: `${r.amd.accumulation.tightness}%` }} />
+                      </div>
+                      <span className="text-[8px] text-blue-400">{r.amd.accumulation.tightness}%</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ▓▓ MANIPULATION EVENT ▓▓ */}
+            {r.amd.manipulation.detected && (
+              <div className={`rounded-xl p-2.5 ${
+                r.amd.manipulation.direction === 'bullish'
+                  ? 'bg-emerald-900/15 ring-1 ring-emerald-800/30'
+                  : 'bg-rose-900/15 ring-1 ring-rose-800/30'
+              }`}>
+                <div className={`text-[8px] uppercase font-bold tracking-wider mb-1.5 ${
+                  r.amd.manipulation.direction === 'bullish' ? 'text-amber-400' : 'text-amber-400'
+                }`}>
+                  ⚡ Manipulation Detected
+                </div>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-lg">
+                    {r.amd.manipulation.direction === 'bullish' ? '⬇️🟢' : '⬆️🔴'}
+                  </span>
+                  <div>
+                    <div className={`text-[10px] font-bold ${
+                      r.amd.manipulation.direction === 'bullish' ? 'text-emerald-400' : 'text-rose-400'
+                    }`}>
+                      {r.amd.manipulation.type === 'sweep-low' ? 'SWEPT 4H LOW → Bullish Setup' : 'SWEPT 4H HIGH → Bearish Setup'}
+                    </div>
+                    <div className="text-[8px] text-zinc-500">{r.amd.manipulation.description}</div>
+                  </div>
+                  {r.amd.manipulation.isClean && (
+                    <span className="ml-auto text-[8px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold">
+                      CLEAN ✨
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="rounded-lg bg-zinc-800/30 p-1.5 text-center">
+                    <div className="text-[7px] text-zinc-500">Sweep Price</div>
+                    <div className="font-mono text-[9px] font-bold text-amber-400">
+                      {formatPrice(r.amd.manipulation.sweepPrice)}
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-zinc-800/30 p-1.5 text-center">
+                    <div className="text-[7px] text-zinc-500">Level Swept</div>
+                    <div className="font-mono text-[9px] font-bold dark-mode-text">
+                      {formatPrice(r.amd.manipulation.levelSwept)}
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-zinc-800/30 p-1.5 text-center">
+                    <div className="text-[7px] text-zinc-500">Recovery</div>
+                    <div className="font-mono text-[9px] font-bold dark-mode-text">
+                      {r.amd.manipulation.recoveryStrength.toFixed(0)}%
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ▓▓ DISTRIBUTION MOVE ▓▓ */}
+            {r.amd.distribution.detected && (
+              <div className="rounded-xl bg-violet-900/15 ring-1 ring-violet-800/30 p-2.5">
+                <div className="text-[8px] uppercase font-bold tracking-wider text-violet-400 mb-1.5">
+                  🚀 Distribution — {r.amd.distribution.direction === 'bullish' ? 'Moving Up' : 'Moving Down'}
+                </div>
+                <div className="grid grid-cols-3 gap-2 mb-2">
+                  <div className="text-center">
+                    <div className="text-[7px] text-zinc-500">Start</div>
+                    <div className="font-mono text-[9px] dark-mode-text">{formatPrice(r.amd.distribution.startPrice)}</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-[7px] text-zinc-500">Current</div>
+                    <div className="font-mono text-[9px] font-bold dark-mode-text">{formatPrice(r.amd.distribution.currentPrice)}</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-[7px] text-zinc-500">Target</div>
+                    <div className={`font-mono text-[9px] font-bold ${
+                      r.amd.distribution.direction === 'bullish' ? 'text-emerald-400' : 'text-rose-400'
+                    }`}>
+                      {formatPrice(r.amd.distribution.targetPrice)}
+                    </div>
+                  </div>
+                </div>
+                {/* Progress to target */}
+                <div className="h-2.5 bg-zinc-800/60 rounded-full overflow-hidden mb-1">
+                  <div
+                    className="h-full bg-gradient-to-r from-violet-600 to-violet-400 rounded-full transition-all"
+                    style={{ width: `${r.amd.distribution.progressPct}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-[7px] text-zinc-500">
+                  <span>Start</span>
+                  <span className="font-bold text-violet-400">{r.amd.distribution.progressPct.toFixed(0)}% to target</span>
+                  <span>Target</span>
+                </div>
+                <div className="flex gap-3 mt-1.5 text-[8px]">
+                  <span className={r.amd.distribution.momentumConfirmed ? 'text-emerald-400' : 'text-zinc-500'}>
+                    {r.amd.distribution.momentumConfirmed ? '✅' : '❌'} Momentum
+                  </span>
+                  <span className={r.amd.distribution.structureConfirmed ? 'text-emerald-400' : 'text-zinc-500'}>
+                    {r.amd.distribution.structureConfirmed ? '✅' : '❌'} Structure Shift
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* ▓▓ AMD ENTRY SIGNAL ▓▓ */}
+            {r.amd.entry.active ? (
+              <div className={`rounded-xl p-3 ${
+                r.amd.entry.direction === 'LONG'
+                  ? 'bg-gradient-to-br from-emerald-950/60 to-emerald-900/20 ring-2 ring-emerald-500/50'
+                  : 'bg-gradient-to-br from-rose-950/60 to-rose-900/20 ring-2 ring-rose-500/50'
+              }`}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-2xl">{r.amd.entry.direction === 'LONG' ? '🟢' : '🔴'}</span>
+                  <div>
+                    <div className={`text-sm font-black ${
+                      r.amd.entry.direction === 'LONG' ? 'text-emerald-400' : 'text-rose-400'
+                    }`}>
+                      AMD {r.amd.entry.direction} SIGNAL
+                    </div>
+                    <div className="text-[8px] text-zinc-400">{r.amd.entry.trigger}</div>
+                  </div>
+                  <div className="ml-auto text-right">
+                    <div className="text-[8px] text-zinc-500">Confidence</div>
+                    <div className={`font-mono font-bold ${
+                      r.amd.entry.confidence >= 70 ? 'text-emerald-400'
+                      : r.amd.entry.confidence >= 50 ? 'text-yellow-400'
+                      : 'text-zinc-400'
+                    }`}>
+                      {r.amd.entry.confidence}%
+                    </div>
+                  </div>
+                </div>
+                {/* Entry levels */}
+                <div className="grid grid-cols-2 gap-2 mb-2">
+                  <div className="rounded-lg bg-zinc-800/40 p-1.5 text-center">
+                    <div className="text-[7px] text-zinc-500">Entry</div>
+                    <div className="font-mono text-[10px] font-bold dark-mode-text">{formatPrice(r.amd.entry.entry)}</div>
+                  </div>
+                  <div className="rounded-lg bg-rose-900/20 p-1.5 text-center">
+                    <div className="text-[7px] text-zinc-500">Stop Loss</div>
+                    <div className="font-mono text-[10px] font-bold text-rose-400">{formatPrice(r.amd.entry.stopLoss)}</div>
+                  </div>
+                </div>
+                {/* Targets */}
+                <div className="grid grid-cols-3 gap-1.5 mb-2">
+                  <div className="rounded-lg bg-emerald-900/15 p-1.5 text-center">
+                    <div className="text-[6px] text-zinc-500">TP1 (Mid)</div>
+                    <div className="font-mono text-[9px] text-emerald-400">{formatPrice(r.amd.entry.takeProfit1)}</div>
+                    <div className="text-[7px] text-zinc-500">R:R {r.amd.entry.riskReward1.toFixed(1)}</div>
+                  </div>
+                  <div className="rounded-lg bg-emerald-900/20 p-1.5 text-center">
+                    <div className="text-[6px] text-zinc-500">TP2 (4H Level)</div>
+                    <div className="font-mono text-[9px] text-emerald-400 font-bold">{formatPrice(r.amd.entry.takeProfit2)}</div>
+                    <div className="text-[7px] text-zinc-500">R:R {r.amd.entry.riskReward2.toFixed(1)}</div>
+                  </div>
+                  <div className="rounded-lg bg-emerald-900/25 p-1.5 text-center">
+                    <div className="text-[6px] text-zinc-500">TP3 (Ext)</div>
+                    <div className="font-mono text-[9px] text-emerald-400">{formatPrice(r.amd.entry.takeProfit3)}</div>
+                    <div className="text-[7px] text-zinc-500">R:R {r.amd.entry.riskReward3.toFixed(1)}</div>
+                  </div>
+                </div>
+                <div className="text-[8px] text-zinc-500">
+                  ❌ Invalidation: <span className="text-rose-400">{r.amd.entry.invalidation}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl bg-zinc-900/30 ring-1 ring-zinc-700/20 p-3 text-center">
+                <div className="text-lg mb-1">⏳</div>
+                <div className="text-[10px] font-bold text-zinc-400">No AMD Entry Signal</div>
+                <div className="text-[8px] text-zinc-500 mt-0.5">{r.amd.entry.trigger}</div>
+              </div>
+            )}
+
+            {/* ▓▓ SHADOW CONFIRMATION ▓▓ */}
+            <div className="rounded-lg bg-zinc-800/30 p-2 flex items-center gap-3">
+              <span className="text-sm">{r.amd.shadowConfirmation.confirms ? '✅' : '⚠️'}</span>
+              <div className="flex-1">
+                <div className="text-[9px] font-bold dark-mode-text">Shadow Confirmation</div>
+                <div className="text-[8px] text-zinc-500">
+                  Bias: {r.amd.shadowConfirmation.bias} |
+                  Stop hunt: {r.amd.shadowConfirmation.stopHuntDetected ? 'Yes' : 'No'} |
+                  Pattern: {r.amd.shadowConfirmation.recentPattern.replace(/-/g, ' ')}
+                </div>
+              </div>
+              <span className={`text-[8px] px-2 py-0.5 rounded-full font-bold ${
+                r.amd.shadowConfirmation.confirms
+                  ? 'bg-emerald-500/20 text-emerald-400'
+                  : 'bg-zinc-700/30 text-zinc-500'
+              }`}>
+                {r.amd.shadowConfirmation.confirms ? 'CONFIRMED' : 'PENDING'}
+              </span>
+            </div>
+
+            {/* ▓▓ AMD SUMMARY ▓▓ */}
+            <div className="rounded-xl bg-zinc-900/30 ring-1 ring-zinc-700/20 p-2.5 text-center">
+              <div className="text-[9px] text-zinc-400 mb-1">{r.amd.summary}</div>
+              <div className="flex items-center justify-center gap-1">
+                <span className="text-[8px] text-zinc-500">Setup Quality:</span>
+                <div className="w-20 h-1.5 bg-zinc-800/60 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full ${
+                      r.amd.score >= 70 ? 'bg-emerald-500'
+                      : r.amd.score >= 40 ? 'bg-yellow-500'
+                      : 'bg-zinc-600'
+                    }`}
+                    style={{ width: `${r.amd.score}%` }}
+                  />
+                </div>
+                <span className="text-[8px] font-bold dark-mode-text">{r.amd.score.toFixed(0)}%</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── FRACTALS TAB ── */}
+        {activeTab === 'fractals' && r && (
+          <div className="space-y-3">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-2">📐 Fractal Analysis</div>
+
+            {/* ▓▓ ALLIGATOR STATE BANNER ▓▓ */}
+            <div className={`rounded-xl p-3 text-center ${
+              r.fractals.alligator.state === 'eating-bull'
+                ? 'bg-gradient-to-r from-emerald-950/60 to-emerald-900/30 ring-1 ring-emerald-500/40'
+                : r.fractals.alligator.state === 'eating-bear'
+                ? 'bg-gradient-to-r from-rose-950/60 to-rose-900/30 ring-1 ring-rose-500/40'
+                : r.fractals.alligator.state === 'awakening'
+                ? 'bg-gradient-to-r from-amber-950/60 to-amber-900/30 ring-1 ring-amber-500/40'
+                : 'bg-gradient-to-r from-zinc-900/60 to-zinc-800/30 ring-1 ring-zinc-700/40'
+            }`}>
+              <div className="text-[10px] font-bold tracking-wider uppercase mb-1 text-zinc-400">
+                🐊 Williams Alligator
+              </div>
+              <div className={`text-sm font-black ${
+                r.fractals.alligator.state === 'eating-bull' ? 'text-emerald-400'
+                : r.fractals.alligator.state === 'eating-bear' ? 'text-rose-400'
+                : r.fractals.alligator.state === 'awakening' ? 'text-amber-400'
+                : r.fractals.alligator.state === 'sated' ? 'text-violet-400'
+                : 'text-zinc-500'
+              }`}>
+                {r.fractals.alligator.state === 'eating-bull' ? '🐊🟢 EATING BULLISH'
+                : r.fractals.alligator.state === 'eating-bear' ? '🐊🔴 EATING BEARISH'
+                : r.fractals.alligator.state === 'awakening' ? '👁 AWAKENING'
+                : r.fractals.alligator.state === 'sated' ? '😴 SATED'
+                : '💤 SLEEPING'}
+              </div>
+              <div className="text-[8px] text-zinc-500 mt-1">{r.fractals.alligator.description}</div>
+              {/* Alligator lines */}
+              <div className="flex justify-center gap-4 mt-2 text-[8px]">
+                <span className="text-blue-400">Jaw: <span className="font-mono">{formatPrice(r.fractals.alligator.jaw)}</span></span>
+                <span className="text-rose-400">Teeth: <span className="font-mono">{formatPrice(r.fractals.alligator.teeth)}</span></span>
+                <span className="text-emerald-400">Lips: <span className="font-mono">{formatPrice(r.fractals.alligator.lips)}</span></span>
+              </div>
+              <div className="text-[7px] text-zinc-600 mt-1">Mouth width: {r.fractals.alligator.mouthWidth.toFixed(2)} ATR</div>
+            </div>
+
+            {/* ▓▓ FRACTAL DIMENSION ▓▓ */}
+            <div className={`rounded-xl p-2.5 ${
+              r.fractals.dimension.regime === 'trending'
+                ? 'bg-gradient-to-r from-emerald-900/20 to-emerald-800/10 ring-1 ring-emerald-800/25'
+                : r.fractals.dimension.regime === 'mean-reverting'
+                ? 'bg-gradient-to-r from-blue-900/20 to-blue-800/10 ring-1 ring-blue-800/25'
+                : 'bg-zinc-900/30 ring-1 ring-zinc-700/20'
+            }`}>
+              <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                🧮 Fractal Dimension & Hurst Exponent
+              </div>
+              <div className="grid grid-cols-4 gap-2">
+                <div className="text-center">
+                  <div className="text-[7px] text-zinc-500">Dimension</div>
+                  <div className="font-mono text-sm font-bold dark-mode-text">{r.fractals.dimension.value.toFixed(3)}</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-[7px] text-zinc-500">Hurst (H)</div>
+                  <div className={`font-mono text-sm font-bold ${
+                    r.fractals.dimension.hurstExponent > 0.6 ? 'text-emerald-400'
+                    : r.fractals.dimension.hurstExponent < 0.4 ? 'text-blue-400'
+                    : 'text-zinc-400'
+                  }`}>{r.fractals.dimension.hurstExponent.toFixed(3)}</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-[7px] text-zinc-500">Regime</div>
+                  <div className={`text-[10px] font-bold ${
+                    r.fractals.dimension.regime === 'trending' ? 'text-emerald-400'
+                    : r.fractals.dimension.regime === 'mean-reverting' ? 'text-blue-400'
+                    : 'text-zinc-400'
+                  }`}>
+                    {r.fractals.dimension.regime === 'trending' ? '📈 Trend'
+                    : r.fractals.dimension.regime === 'mean-reverting' ? '↔️ Revert'
+                    : '🎲 Random'}
+                  </div>
+                </div>
+                <div className="text-center">
+                  <div className="text-[7px] text-zinc-500">Advice</div>
+                  <div className={`text-[9px] font-bold ${
+                    r.fractals.dimension.tradingAdvice === 'trend-follow' ? 'text-emerald-400'
+                    : r.fractals.dimension.tradingAdvice === 'mean-revert' ? 'text-blue-400'
+                    : 'text-rose-400'
+                  }`}>
+                    {r.fractals.dimension.tradingAdvice === 'trend-follow' ? '🏄 Trend Follow'
+                    : r.fractals.dimension.tradingAdvice === 'mean-revert' ? '↩️ Mean Revert'
+                    : '🚫 Stay Out'}
+                  </div>
+                </div>
+              </div>
+              {/* H exponent visual scale */}
+              <div className="mt-2 relative h-3 bg-zinc-800/60 rounded-full overflow-hidden">
+                <div className="absolute inset-0 flex">
+                  <div className="flex-1 bg-blue-500/20" title="Mean-reverting" />
+                  <div className="flex-1 bg-zinc-500/20" title="Random" />
+                  <div className="flex-1 bg-emerald-500/20" title="Trending" />
+                </div>
+                <div
+                  className="absolute top-0 h-full w-1 bg-yellow-400 rounded-full"
+                  style={{ left: `${r.fractals.dimension.hurstExponent * 100}%` }}
+                  title={`H = ${r.fractals.dimension.hurstExponent.toFixed(3)}`}
+                />
+              </div>
+              <div className="flex justify-between text-[6px] text-zinc-600 mt-0.5 px-1">
+                <span>H=0 Revert</span>
+                <span>H=0.5 Random</span>
+                <span>H=1.0 Trend</span>
+              </div>
+            </div>
+
+            {/* ▓▓ FRACTAL BANDS ▓▓ */}
+            <div className="rounded-xl bg-zinc-900/30 p-2.5">
+              <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                📊 Fractal Bands
+              </div>
+              <div className="grid grid-cols-4 gap-2 mb-2">
+                <div className="text-center">
+                  <div className="text-[7px] text-zinc-500">Upper</div>
+                  <div className="font-mono text-[9px] text-rose-400">{formatPrice(r.fractals.bands.currentUpper)}</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-[7px] text-zinc-500">Mid</div>
+                  <div className="font-mono text-[9px] dark-mode-text">{formatPrice(r.fractals.bands.currentMid)}</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-[7px] text-zinc-500">Lower</div>
+                  <div className="font-mono text-[9px] text-emerald-400">{formatPrice(r.fractals.bands.currentLower)}</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-[7px] text-zinc-500">Width</div>
+                  <div className="font-mono text-[9px] dark-mode-text">{r.fractals.bands.bandwidthPct.toFixed(2)}%</div>
+                </div>
+              </div>
+              {/* Price position in band */}
+              <div className="h-3 bg-gradient-to-r from-emerald-900/40 via-zinc-800/40 to-rose-900/40 rounded-full overflow-hidden relative">
+                <div
+                  className="absolute top-0 h-full w-2 bg-yellow-400 rounded-full shadow-lg shadow-yellow-400/30"
+                  style={{ left: `calc(${r.fractals.bands.pricePosition}% - 4px)` }}
+                />
+              </div>
+              <div className="flex justify-between text-[6px] text-zinc-600 mt-0.5 px-1">
+                <span>Lower Band (Buy)</span>
+                <span className="font-bold text-yellow-400">{r.fractals.bands.pricePosition.toFixed(0)}%</span>
+                <span>Upper Band (Sell)</span>
+              </div>
+            </div>
+
+            {/* ▓▓ FRACTAL LEVELS (S/R) ▓▓ */}
+            {r.fractals.levels.length > 0 && (
+              <div className="rounded-xl bg-zinc-900/30 p-2.5">
+                <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                  📍 Fractal S/R Levels ({r.fractals.levels.length})
+                </div>
+                <div className="space-y-1 max-h-40 overflow-y-auto">
+                  {r.fractals.levels.slice(0, 10).map((level, i) => (
+                    <div key={i} className="flex items-center gap-2 text-[9px]">
+                      <span className={`w-2 h-2 rounded-full ${level.type === 'support' ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+                      <span className={`font-bold w-8 ${level.type === 'support' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {level.type === 'support' ? 'SUP' : 'RES'}
+                      </span>
+                      <span className="font-mono dark-mode-text w-16">{formatPrice(level.price)}</span>
+                      <span className="text-zinc-500">{level.touchCount} frac{level.touchCount > 1 ? 's' : ''}</span>
+                      {level.isCluster && (
+                        <span className="text-[7px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-400 font-bold">CLUSTER</span>
+                      )}
+                      <div className="flex-1 h-1.5 bg-zinc-800/60 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${level.type === 'support' ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                          style={{ width: `${level.strength}%` }}
+                        />
+                      </div>
+                      <span className="text-[7px] text-zinc-500 w-6 text-right">{level.strength.toFixed(0)}%</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ▓▓ BREAKOUT SIGNALS ▓▓ */}
+            {r.fractals.breakouts.length > 0 && (
+              <div className="rounded-xl bg-zinc-900/30 p-2.5">
+                <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                  💥 Fractal Breakouts ({r.fractals.breakouts.length})
+                </div>
+                <div className="space-y-1.5">
+                  {r.fractals.breakouts.slice(0, 5).map((bo, i) => (
+                    <div key={i} className={`rounded-lg p-2 ${
+                      bo.direction === 'bullish' ? 'bg-emerald-900/15 ring-1 ring-emerald-800/25'
+                      : 'bg-rose-900/15 ring-1 ring-rose-800/25'
+                    }`}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px]">{bo.direction === 'bullish' ? '🟢⬆️' : '🔴⬇️'}</span>
+                        <span className={`text-[10px] font-bold ${
+                          bo.direction === 'bullish' ? 'text-emerald-400' : 'text-rose-400'
+                        }`}>
+                          {bo.direction.toUpperCase()} BREAKOUT
+                        </span>
+                        <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-zinc-800/50 text-zinc-300 font-bold">
+                          {bo.breakStrength.toFixed(0)}%
+                        </span>
+                      </div>
+                      <div className="text-[8px] text-zinc-500 mt-0.5">{bo.description}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ▓▓ SELF-SIMILARITY ▓▓ */}
+            <div className="rounded-xl bg-zinc-900/30 p-2.5">
+              <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-2">
+                🔄 Self-Similarity Across Timeframes
+              </div>
+              <div className="flex items-center gap-2 mb-2">
+                <span className={`text-sm ${
+                  r.fractals.selfSimilarity.alignment === 'aligned' ? '✅' : '⚠️'
+                }`}>
+                  {r.fractals.selfSimilarity.alignment === 'aligned' ? '✅' : '⚠️'}
+                </span>
+                <div className="flex-1">
+                  <div className="text-[9px] dark-mode-text">{r.fractals.selfSimilarity.patternMatch}</div>
+                </div>
+                <span className={`text-[8px] px-2 py-0.5 rounded-full font-bold ${
+                  r.fractals.selfSimilarity.score >= 75 ? 'bg-emerald-500/20 text-emerald-400'
+                  : r.fractals.selfSimilarity.score >= 50 ? 'bg-yellow-500/20 text-yellow-400'
+                  : 'bg-zinc-700/30 text-zinc-500'
+                }`}>
+                  {r.fractals.selfSimilarity.score}%
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                {r.fractals.selfSimilarity.timeframes.map((tf, i) => (
+                  <div key={i} className="rounded-lg bg-zinc-800/30 p-1.5 text-center">
+                    <div className="text-[7px] text-zinc-500">{tf.tf}</div>
+                    <div className={`text-[9px] font-bold ${
+                      tf.fractalBias === 'bullish' ? 'text-emerald-400'
+                      : tf.fractalBias === 'bearish' ? 'text-rose-400'
+                      : 'text-zinc-400'
+                    }`}>
+                      {tf.trend === 'up' ? '↗' : tf.trend === 'down' ? '↘' : '→'} {tf.fractalBias}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ▓▓ ACTIVE FRACTALS ▓▓ */}
+            <div className="rounded-xl bg-zinc-900/30 p-2.5">
+              <div className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 mb-1">
+                🔺🔻 Active Fractals ({r.fractals.activeFractals.length} of {r.fractals.fractals.length})
+              </div>
+              <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
+                {r.fractals.activeFractals.slice(0, 20).map((f, i) => (
+                  <span key={i} className={`inline-flex items-center gap-0.5 text-[7px] px-1.5 py-0.5 rounded ${
+                    f.type === 'high'
+                      ? 'bg-rose-900/20 text-rose-400 ring-1 ring-rose-800/20'
+                      : 'bg-emerald-900/20 text-emerald-400 ring-1 ring-emerald-800/20'
+                  }`}>
+                    {f.type === 'high' ? '🔻' : '🔺'}
+                    <span className="font-mono">{formatPrice(f.price)}</span>
+                    <span className="text-zinc-500">o{f.order}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <ScoreBar value={r.fractals.score} label="Fractal Score" />
+          </div>
+        )}
+
+        {/* Fractals tab no data */}
+        {activeTab === 'fractals' && !r && (
+          <div className="text-center py-6">
+            <div className="text-2xl mb-2">📐</div>
+            <div className="text-sm text-zinc-500">
+              {candles.length < 20 ? `Loading... (${candles.length}/20 candles)` : 'Analyzing fractals...'}
+            </div>
+          </div>
+        )}
+
+        {/* ── FLOOR/CEILING LEVELS TAB ── */}
+        {activeTab === 'levels' && r && (
+          <div className="space-y-3">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-2">🏠 Multi-Timeframe Floors &amp; Ceilings</div>
+
+            {/* ▓▓ GLOBAL SUMMARY BAR ▓▓ */}
+            <div className={`rounded-xl p-3 text-center ${
+              r.floorCeiling.bias === 'near-floor-bounce'
+                ? 'bg-gradient-to-r from-emerald-950/60 to-emerald-900/30 ring-1 ring-emerald-500/40'
+                : r.floorCeiling.bias === 'near-ceiling-reject'
+                ? 'bg-gradient-to-r from-rose-950/60 to-rose-900/30 ring-1 ring-rose-500/40'
+                : r.floorCeiling.bias === 'breakout-up'
+                ? 'bg-gradient-to-r from-cyan-950/60 to-cyan-900/30 ring-1 ring-cyan-500/40'
+                : r.floorCeiling.bias === 'breakdown'
+                ? 'bg-gradient-to-r from-orange-950/60 to-orange-900/30 ring-1 ring-orange-500/40'
+                : 'bg-gradient-to-r from-zinc-900/60 to-zinc-800/30 ring-1 ring-zinc-600/40'
+            }`}>
+              <div className="text-[9px] uppercase tracking-wider text-zinc-400 mb-1">Price Position in Range</div>
+              <div className="flex items-center gap-2 justify-center">
+                <span className="text-[10px] text-emerald-400 font-mono">
+                  {r.floorCeiling.globalFloor ? formatPrice(r.floorCeiling.globalFloor) : '—'}
+                </span>
+                <div className="flex-1 max-w-40 h-3 bg-zinc-800/60 rounded-full overflow-hidden relative">
+                  <div className="absolute inset-0 bg-gradient-to-r from-emerald-600/30 via-zinc-600/20 to-rose-600/30 rounded-full" />
+                  <div
+                    className="absolute top-0 h-full w-1.5 bg-white rounded-full shadow-sm shadow-white/50 transition-all"
+                    style={{ left: `calc(${Math.max(2, Math.min(98, r.floorCeiling.priceInRange))}% - 3px)` }}
+                  />
+                </div>
+                <span className="text-[10px] text-rose-400 font-mono">
+                  {r.floorCeiling.globalCeiling ? formatPrice(r.floorCeiling.globalCeiling) : '—'}
+                </span>
+              </div>
+              <div className="mt-1 text-[11px] font-bold">
+                {r.floorCeiling.bias === 'near-floor-bounce' && <span className="text-emerald-400">📈 Near Floor — Bounce Zone</span>}
+                {r.floorCeiling.bias === 'near-ceiling-reject' && <span className="text-rose-400">📉 Near Ceiling — Rejection Zone</span>}
+                {r.floorCeiling.bias === 'breakout-up' && <span className="text-cyan-400">🚀 Above Ceiling — Breakout</span>}
+                {r.floorCeiling.bias === 'breakdown' && <span className="text-orange-400">💥 Below Floor — Breakdown</span>}
+                {r.floorCeiling.bias === 'mid-range' && <span className="text-zinc-300">↔️ Mid-Range — No Edge</span>}
+              </div>
+              <div className="text-[9px] text-zinc-500 mt-0.5">
+                Price at {r.floorCeiling.priceInRange.toFixed(0)}% of range • {formatPrice(r.floorCeiling.currentPrice)}
+              </div>
+            </div>
+
+            {/* ▓▓ CONFLUENT LEVELS (appear on multiple TFs) ▓▓ */}
+            {r.floorCeiling.confluenceLevels.length > 0 && (
+              <div className="rounded-xl bg-violet-950/20 ring-1 ring-violet-500/20 p-2.5">
+                <div className="text-[8px] uppercase font-bold tracking-wider text-violet-400 mb-1.5">
+                  ⭐ Cross-Timeframe Confluent Levels ({r.floorCeiling.confluenceLevels.length})
+                </div>
+                <div className="space-y-1">
+                  {r.floorCeiling.confluenceLevels.slice(0, 6).map((cl, i) => (
+                    <div key={i} className={`flex items-center gap-2 px-2 py-1 rounded-lg ${
+                      cl.type === 'floor'
+                        ? 'bg-emerald-900/20 ring-1 ring-emerald-800/20'
+                        : 'bg-rose-900/20 ring-1 ring-rose-800/20'
+                    }`}>
+                      <span className="text-[10px]">{cl.type === 'floor' ? '🟢' : '🔴'}</span>
+                      <span className="text-[10px] font-mono font-bold dark-mode-text flex-1">
+                        {formatPrice(cl.price)}
+                      </span>
+                      <div className="flex gap-0.5">
+                        {cl.timeframes.map(tf => (
+                          <span key={tf} className="text-[7px] px-1 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
+                            {tf}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="w-12 h-1.5 bg-zinc-800/60 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${cl.type === 'floor' ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                          style={{ width: `${cl.confluenceScore}%` }}
+                        />
+                      </div>
+                      <span className="text-[8px] font-mono text-zinc-500">{cl.confluenceScore.toFixed(0)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ▓▓ PER-TIMEFRAME LEVELS ▓▓ */}
+            {r.floorCeiling.timeframes.map((tfData) => (
+              <div key={tfData.tf} className="rounded-xl bg-zinc-900/30 p-2.5">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-violet-900/40 text-violet-300 ring-1 ring-violet-700/30 font-mono">
+                    {tfData.tf}
+                  </span>
+                  <span className={`text-[8px] px-1.5 py-0.5 rounded font-semibold ${
+                    tfData.currentPosition === 'near-floor'
+                      ? 'bg-emerald-900/30 text-emerald-400'
+                      : tfData.currentPosition === 'near-ceiling'
+                      ? 'bg-rose-900/30 text-rose-400'
+                      : 'bg-zinc-800 text-zinc-400'
+                  }`}>
+                    {tfData.currentPosition === 'near-floor' ? '↗ Near Floor' : tfData.currentPosition === 'near-ceiling' ? '↘ Near Ceiling' : '↔ Mid-Range'}
+                  </span>
+                  <span className={`text-[6px] px-1 py-0.5 rounded font-mono ${
+                    tfData.dataSource === 'fetched' ? 'bg-cyan-900/30 text-cyan-400' : 'bg-zinc-800 text-zinc-500'
+                  }`}>
+                    {tfData.dataSource === 'fetched' ? '🔗 LIVE' : '🔄 Resampled'} · {tfData.candleCount}c
+                  </span>
+                  <span className="text-[8px] text-zinc-600 ml-auto font-mono">
+                    Range: {formatPrice(tfData.range.low)} — {formatPrice(tfData.range.high)}
+                  </span>
+                </div>
+
+                {/* Ceilings (resistance) */}
+                {tfData.ceilings.length > 0 && (
+                  <div className="mb-1.5">
+                    <div className="text-[7px] uppercase tracking-wider text-rose-500/80 font-bold mb-0.5">Ceilings ▲</div>
+                    <div className="space-y-0.5">
+                      {tfData.ceilings.slice(0, 4).map((level, i) => (
+                        <div key={i} className="flex items-center gap-1.5 text-[9px]">
+                          <span className={`w-1.5 h-1.5 rounded-full ${
+                            level.strength >= 70 ? 'bg-rose-400' : level.strength >= 40 ? 'bg-rose-500/60' : 'bg-rose-600/40'
+                          }`} />
+                          <span className="font-mono font-bold text-rose-300 w-20">{formatPrice(level.price)}</span>
+                          <div className="flex-1 h-1 bg-zinc-800/40 rounded-full overflow-hidden">
+                            <div className="h-full bg-rose-500/60 rounded-full" style={{ width: `${level.strength}%` }} />
+                          </div>
+                          <span className="text-[7px] text-zinc-500 w-6 text-right">{level.strength.toFixed(0)}</span>
+                          <span className="text-[7px] text-zinc-600 w-10 text-right">
+                            +{level.distancePct.toFixed(2)}%
+                          </span>
+                          {level.touches > 1 && (
+                            <span className="text-[7px] text-zinc-500">×{level.touches}</span>
+                          )}
+                          {level.source === 'round-number' && (
+                            <span className="text-[6px] px-0.5 rounded bg-amber-900/30 text-amber-400">RN</span>
+                          )}
+                          {level.broken && (
+                            <span className="text-[6px] px-0.5 rounded bg-zinc-800 text-zinc-500">BRK</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Mid divider with current price */}
+                <div className="flex items-center gap-2 py-1 my-1 border-t border-b border-zinc-800/40">
+                  <span className="text-[7px] text-zinc-500 uppercase">Current</span>
+                  <span className="text-[10px] font-mono font-bold text-white">{formatPrice(currentPrice)}</span>
+                  <div className="flex-1 border-t border-dashed border-zinc-700" />
+                  <span className="text-[8px] font-mono text-zinc-500">Mid: {formatPrice(tfData.midPoint)}</span>
+                </div>
+
+                {/* Floors (support) */}
+                {tfData.floors.length > 0 && (
+                  <div>
+                    <div className="text-[7px] uppercase tracking-wider text-emerald-500/80 font-bold mb-0.5">Floors ▼</div>
+                    <div className="space-y-0.5">
+                      {tfData.floors.slice(0, 4).map((level, i) => (
+                        <div key={i} className="flex items-center gap-1.5 text-[9px]">
+                          <span className={`w-1.5 h-1.5 rounded-full ${
+                            level.strength >= 70 ? 'bg-emerald-400' : level.strength >= 40 ? 'bg-emerald-500/60' : 'bg-emerald-600/40'
+                          }`} />
+                          <span className="font-mono font-bold text-emerald-300 w-20">{formatPrice(level.price)}</span>
+                          <div className="flex-1 h-1 bg-zinc-800/40 rounded-full overflow-hidden">
+                            <div className="h-full bg-emerald-500/60 rounded-full" style={{ width: `${level.strength}%` }} />
+                          </div>
+                          <span className="text-[7px] text-zinc-500 w-6 text-right">{level.strength.toFixed(0)}</span>
+                          <span className="text-[7px] text-zinc-600 w-10 text-right">
+                            -{level.distancePct.toFixed(2)}%
+                          </span>
+                          {level.touches > 1 && (
+                            <span className="text-[7px] text-zinc-500">×{level.touches}</span>
+                          )}
+                          {level.source === 'round-number' && (
+                            <span className="text-[6px] px-0.5 rounded bg-amber-900/30 text-amber-400">RN</span>
+                          )}
+                          {level.broken && (
+                            <span className="text-[6px] px-0.5 rounded bg-zinc-800 text-zinc-500">BRK</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {tfData.floors.length === 0 && tfData.ceilings.length === 0 && (
+                  <div className="text-[9px] text-zinc-600 text-center py-2">
+                    Not enough data for {tfData.tf} levels
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {r.floorCeiling.timeframes.length === 0 && (
+              <div className="text-center py-4 text-[10px] text-zinc-500">
+                Insufficient candle data for floor/ceiling analysis
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Levels tab no data */}
+        {activeTab === 'levels' && !r && (
+          <div className="text-center py-6">
+            <div className="text-2xl mb-2">🏠</div>
+            <div className="text-sm text-zinc-500">
+              {candles.length < 50 ? `Loading... (${candles.length}/50 candles)` : 'Analyzing floors & ceilings...'}
+            </div>
+          </div>
+        )}
+
+        {/* AMD tab no data */}
+        {activeTab === 'amd' && !r && (
+          <div className="text-center py-6">
+            <div className="text-2xl mb-2">⏱</div>
+            <div className="text-sm text-zinc-500">
+              {candles.length < 96 ? `Need 96+ candles for AMD (${candles.length} loaded)` : 'Analyzing AMD phases...'}
+            </div>
+            <div className="text-[9px] text-zinc-600 mt-1">4H Roadmap requires ~8 hours of 5min data</div>
           </div>
         )}
 

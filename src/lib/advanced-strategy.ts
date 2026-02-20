@@ -20,6 +20,35 @@ import {
   type ShadowClusterZone,
   type StopHuntEvent,
 } from "./shadow-analysis";
+import {
+  analyzeAMD,
+  type AMDAnalysisResult,
+  type AMDPhase,
+  type AMDEntrySignal,
+  type FourHourRoadmap,
+  type ManipulationEvent,
+  type AccumulationZone,
+  type DistributionMove,
+} from "./amd-strategy";
+import {
+  analyzeFractals,
+  type FractalAnalysisResult,
+  type FractalPoint,
+  type FractalLevel,
+  type FractalBreakout,
+  type AlligatorState,
+  type FractalDimension,
+  type FractalBand,
+  type SelfSimilarity,
+} from "./fractal-analysis";
+import {
+  analyzeFloorsCeilings,
+  type FloorCeilingAnalysis,
+  type FloorCeilingLevel,
+  type TimeframeFloorCeiling,
+  type ConfluentLevel,
+  type HTFCandleMap,
+} from "./floor-ceiling";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -310,6 +339,9 @@ export type AdvancedStrategyResult = {
   execution: ExecutionAnalysis;
   risk: RiskAnalysis;
   shadows: ShadowAnalysisResult;      // Shadow/wick analysis
+  amd: AMDAnalysisResult;             // 4H Roadmap + 5min AMD model
+  fractals: FractalAnalysisResult;    // Fractal analysis (Williams, Dimension, Alligator)
+  floorCeiling: FloorCeilingAnalysis; // Multi-timeframe floor/ceiling levels
   masterScore: number;                // -100 to +100 (composite of all pillars)
   masterDirection: 'LONG' | 'SHORT' | 'WAIT';
   masterGrade: 'A+' | 'A' | 'B' | 'C' | 'NO-TRADE';
@@ -2216,6 +2248,8 @@ export function runAdvancedStrategy(
   tradeHistory: TradeRecord[],
   config: AdvancedConfig = DEFAULT_ADVANCED_CONFIG,
   symbol: string = '',
+  interval: string = '1m',
+  htfCandles: HTFCandleMap = {},
 ): AdvancedStrategyResult | null {
   if (candles.length < 50) return null;
 
@@ -2242,11 +2276,16 @@ export function runAdvancedStrategy(
   const liquidity = analyzeLiquidity(candles, pa, orderBook);
   const structure = analyzeStructure(candles, indicators, pa);
   const shadows = analyzeShadows(candles, { lookback: 50, clusterLookback: 100 });
+  const amd = analyzeAMD(candles);
+  const fract = analyzeFractals(candles, { lookback: 100 });
   const execution = analyzeExecution(candles, indicators, orderFlow, liquidity, structure, shadows, config);
   const risk = analyzeRisk(execution, config, tradeHistory);
 
   // ── Multi-Timeframe Analysis ──
   const mtf = analyzeMultiTimeframe(candles);
+
+  // ── Floor/Ceiling Analysis (multi-timeframe levels) ──
+  const floorCeiling = analyzeFloorsCeilings(candles, interval, htfCandles);
 
   // ── Master Score (now includes MTF + shadows) ──
   const mtfBonus = mtf.htfScore * 0.15; // add 15% weight for MTF alignment
@@ -2288,6 +2327,21 @@ export function runAdvancedStrategy(
   if (masterDirection === 'LONG' && shadows.bias === 'bearish') confidence *= 0.9;
   if (masterDirection === 'SHORT' && shadows.bias === 'bullish') confidence *= 0.9;
 
+  // Boost confidence when AMD entry aligns with master direction
+  if (amd.entry.active) {
+    if (amd.entry.direction === masterDirection) confidence = Math.min(100, confidence + 8);
+    else if (masterDirection !== 'WAIT') confidence *= 0.85;
+  }
+
+  // Fractal dimension filter: reduce confidence in random regime, boost in trending
+  if (fract.dimension.regime === 'trending') confidence = Math.min(100, confidence + 5);
+  else if (fract.dimension.regime === 'random') confidence *= 0.85;
+
+  // Alligator confirmation
+  if (masterDirection === 'LONG' && fract.alligator.state === 'eating-bull') confidence = Math.min(100, confidence + 5);
+  if (masterDirection === 'SHORT' && fract.alligator.state === 'eating-bear') confidence = Math.min(100, confidence + 5);
+  if (fract.alligator.state === 'sleeping') confidence *= 0.9;
+
   // ── Pending Setups ──
   const currentPrice = candles[candles.length - 1].close;
   const pendingSetups = generatePendingSetups(
@@ -2309,6 +2363,9 @@ export function runAdvancedStrategy(
     execution,
     risk,
     shadows,
+    amd,
+    fractals: fract,
+    floorCeiling,
     masterScore,
     masterDirection,
     masterGrade,
