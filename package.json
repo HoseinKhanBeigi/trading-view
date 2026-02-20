@@ -13,7 +13,7 @@
   "dependencies": {
     "clsx": "^2.1.1",
     "lightweight-charts": "^5.0.9",
-    "next": "16.0.1",
+    "next": "16.0.7",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "sonner": "^1.5.0",
@@ -29,7 +29,7 @@
     "ts-jest": "^29.2.5",
     "@types/jest": "^29.5.12",
     "@playwright/test": "^1.48.2",
-    "eslint-config-next": "16.0.1",
+    "eslint-config-next": "16.0.7",
     "tailwindcss": "^4",
     "typescript": "5.9.3"
   }
