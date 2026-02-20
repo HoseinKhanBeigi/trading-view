@@ -1,8 +1,9 @@
 import type { CandlestickData } from "lightweight-charts";
 import { detectSwingPoints, type SwingPoint } from "./price-action";
+import { ema, rsi, atr as calcATR } from "./indicators";
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// MULTI-TIMEFRAME FLOOR & CEILING DETECTION
+// MULTI-TIMEFRAME FLOOR & CEILING DETECTION + BREAK PREDICTION
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -36,6 +37,38 @@ export type TimeframeFloorCeiling = {
   dataSource: 'resampled' | 'fetched'; // was data resampled or fetched directly?
 };
 
+// ─── Break Prediction Types ────────────────────────────────────────────────
+
+export type BreakPrediction = {
+  level: FloorCeilingLevel;
+  tf: string;                    // which timeframe this level belongs to
+  breakProbability: number;      // 0-100 (100 = very likely to break)
+  holdProbability: number;       // 0-100 (100 = very likely to hold)
+  verdict: 'LIKELY BREAK' | 'LIKELY HOLD' | 'UNCERTAIN';
+  confidence: number;            // 0-100 how confident the prediction is
+  factors: BreakFactor[];        // individual factors that contribute
+  eta: string;                   // estimated "time to test" label (e.g. "~5 candles")
+};
+
+export type BreakFactor = {
+  name: string;
+  value: number;                 // -1 (strong hold) to +1 (strong break)
+  weight: number;                // importance 0-1
+  detail: string;                // human-readable explanation
+};
+
+export type BreakPredictionSummary = {
+  predictions: BreakPrediction[];         // all predictions, sorted by break probability
+  mostLikelyBreak: BreakPrediction | null;  // the level most likely to break next
+  mostLikelyHold: BreakPrediction | null;   // the strongest level (most likely to hold)
+  nearestFloorPrediction: BreakPrediction | null;
+  nearestCeilingPrediction: BreakPrediction | null;
+  overallBias: 'breaking-up' | 'breaking-down' | 'range-bound' | 'indeterminate';
+  biasSummary: string;           // human-readable prediction summary
+};
+
+// ─── Main Types ────────────────────────────────────────────────────────────
+
 export type FloorCeilingAnalysis = {
   timeframes: TimeframeFloorCeiling[];
   // Cross-TF confluence: levels that appear on multiple timeframes
@@ -46,6 +79,8 @@ export type FloorCeilingAnalysis = {
   currentPrice: number;
   priceInRange: number;          // 0 (at floor) to 100 (at ceiling)
   bias: 'near-floor-bounce' | 'near-ceiling-reject' | 'mid-range' | 'breakout-up' | 'breakdown';
+  // Break predictions
+  breakPredictions: BreakPredictionSummary;
 };
 
 export type ConfluentLevel = {
@@ -457,6 +492,344 @@ function findConfluentLevels(
   return confluent.sort((a, b) => b.confluenceScore - a.confluenceScore);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// BREAK PREDICTION ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Predict whether each floor/ceiling is likely to BREAK or HOLD.
+ *
+ * Scoring factors:
+ *   1. Momentum toward level    — EMA slope + ROC direction
+ *   2. Proximity                — Closer = more imminent, needs less energy
+ *   3. Volatility expansion     — Rising ATR = bigger moves coming
+ *   4. Touch fatigue            — More touches = weaker (orders absorbed)
+ *   5. Range compression        — Narrowing candle ranges = pressure build
+ *   6. Level strength (inverse) — Weak levels break easier
+ *   7. Previously broken        — Broken-and-reclaimed levels are weaker
+ *   8. RSI extreme              — Overbought approaching ceiling → higher break chance
+ *   9. Cross-TF confluence      — Multi-TF levels are harder to break
+ */
+function predictBreaks(
+  candles: CandlestickData[],
+  timeframes: TimeframeFloorCeiling[],
+  confluenceLevels: ConfluentLevel[],
+  htfCandles: HTFCandleMap,
+): BreakPredictionSummary {
+  const empty: BreakPredictionSummary = {
+    predictions: [],
+    mostLikelyBreak: null,
+    mostLikelyHold: null,
+    nearestFloorPrediction: null,
+    nearestCeilingPrediction: null,
+    overallBias: 'indeterminate',
+    biasSummary: 'Not enough data for break prediction',
+  };
+
+  if (candles.length < 20) return empty;
+
+  const currentPrice = candles[candles.length - 1].close;
+  const closes = candles.map(c => c.close);
+
+  // ── Pre-compute indicators on base candles ──
+  const ema9 = ema(closes, 9);
+  const ema21 = ema(closes, 21);
+  const rsiValues = rsi(closes, 14);
+  const atrValues = calcATR(candles, 14);
+  const last = candles.length - 1;
+
+  const currentEma9 = ema9[last] ?? currentPrice;
+  const currentEma21 = ema21[last] ?? currentPrice;
+  const prevEma9 = ema9[last - 1] ?? currentPrice;
+  const currentRSI = rsiValues[last] ?? 50;
+  const currentATR = atrValues[last] ?? 0;
+  const prevATR = atrValues[last - 5] ?? currentATR;
+
+  // EMA slope (normalized): positive = price moving up
+  const emaSlope = currentPrice > 0 ? (currentEma9 - prevEma9) / currentPrice * 1000 : 0;
+
+  // Trend direction: above EMA21 = bullish
+  const trendBias = currentEma9 > currentEma21 ? 1 : currentEma9 < currentEma21 ? -1 : 0;
+
+  // ATR expansion ratio: >1 means volatility is increasing
+  const atrExpansion = prevATR > 0 ? currentATR / prevATR : 1;
+
+  // Range compression: compare last 5 candle ranges to previous 10
+  const recentRanges = candles.slice(-5).map(c => c.high - c.low);
+  const olderRanges = candles.slice(-15, -5).map(c => c.high - c.low);
+  const avgRecentRange = recentRanges.reduce((s, r) => s + r, 0) / (recentRanges.length || 1);
+  const avgOlderRange = olderRanges.reduce((s, r) => s + r, 0) / (olderRanges.length || 1);
+  const rangeCompression = avgOlderRange > 0 ? avgRecentRange / avgOlderRange : 1;
+
+  // Build set of confluent-level prices for quick lookup
+  const confluentPrices = new Map<string, ConfluentLevel>();
+  for (const cl of confluenceLevels) {
+    confluentPrices.set(`${cl.type}-${cl.price.toFixed(2)}`, cl);
+  }
+
+  const predictions: BreakPrediction[] = [];
+
+  for (const tfData of timeframes) {
+    // Get candles for this timeframe (for TF-specific momentum)
+    const tfCandles = htfCandles[tfData.tf] ?? candles;
+    const tfCloses = tfCandles.map(c => c.close);
+    const tfEma9 = ema(tfCloses, 9);
+    const tfLast = tfCandles.length - 1;
+    const tfEmaSlope = tfLast > 0 && tfCandles[tfLast]?.close > 0
+      ? ((tfEma9[tfLast] ?? 0) - (tfEma9[tfLast - 1] ?? 0)) / tfCandles[tfLast].close * 1000
+      : emaSlope;
+
+    const allLevels = [
+      ...tfData.floors.slice(0, 3),
+      ...tfData.ceilings.slice(0, 3),
+    ];
+
+    for (const level of allLevels) {
+      const factors: BreakFactor[] = [];
+
+      // ── Factor 1: Momentum toward level ──
+      // For floor: negative momentum = moving toward it = more break risk
+      // For ceiling: positive momentum = moving toward it = more break risk
+      const momentumToward = level.type === 'floor'
+        ? -tfEmaSlope  // negative slope means moving down toward floor
+        : tfEmaSlope;  // positive slope means moving up toward ceiling
+      const momentumNorm = Math.max(-1, Math.min(1, momentumToward / 2));
+      factors.push({
+        name: 'Momentum',
+        value: momentumNorm,
+        weight: 0.2,
+        detail: momentumNorm > 0.3
+          ? `Strong momentum toward ${level.type} (slope: ${tfEmaSlope.toFixed(2)})`
+          : momentumNorm < -0.3
+          ? `Moving away from ${level.type}`
+          : `Neutral momentum`,
+      });
+
+      // ── Factor 2: Proximity ──
+      // Closer levels are more at risk (less energy needed)
+      const proxScore = level.distancePct < 0.1 ? 1
+        : level.distancePct < 0.3 ? 0.7
+        : level.distancePct < 0.5 ? 0.4
+        : level.distancePct < 1.0 ? 0.1
+        : -0.2;
+      factors.push({
+        name: 'Proximity',
+        value: proxScore,
+        weight: 0.15,
+        detail: `${level.distancePct.toFixed(2)}% away (${proxScore > 0.5 ? 'very close' : proxScore > 0 ? 'nearby' : 'distant'})`,
+      });
+
+      // ── Factor 3: Volatility expansion ──
+      const volFactor = atrExpansion > 1.3 ? 0.8
+        : atrExpansion > 1.1 ? 0.4
+        : atrExpansion > 0.9 ? 0
+        : -0.4;
+      factors.push({
+        name: 'Volatility',
+        value: volFactor,
+        weight: 0.15,
+        detail: atrExpansion > 1.2
+          ? `ATR expanding ${((atrExpansion - 1) * 100).toFixed(0)}% — larger moves expected`
+          : atrExpansion < 0.8
+          ? `ATR contracting — level likely to hold`
+          : `Normal volatility`,
+      });
+
+      // ── Factor 4: Touch fatigue ──
+      // More touches = more order absorption = weaker level
+      const touchFatigue = level.touches >= 5 ? 0.8
+        : level.touches >= 3 ? 0.4
+        : level.touches === 2 ? 0.1
+        : -0.3; // first touch = strong
+      factors.push({
+        name: 'Touch Fatigue',
+        value: touchFatigue,
+        weight: 0.12,
+        detail: `${level.touches} touch${level.touches !== 1 ? 'es' : ''} — ${
+          level.touches >= 4 ? 'heavily tested, orders depleted' :
+          level.touches >= 2 ? 'moderately tested' : 'fresh level'
+        }`,
+      });
+
+      // ── Factor 5: Range compression (squeeze) ──
+      const squeezeFactor = rangeCompression < 0.6 ? 0.8
+        : rangeCompression < 0.8 ? 0.4
+        : rangeCompression > 1.3 ? -0.2
+        : 0;
+      factors.push({
+        name: 'Compression',
+        value: squeezeFactor,
+        weight: 0.1,
+        detail: rangeCompression < 0.7
+          ? `Range compressed ${((1 - rangeCompression) * 100).toFixed(0)}% — pressure building`
+          : `Normal range activity`,
+      });
+
+      // ── Factor 6: Level strength (inverse) ──
+      // Weak levels break easier
+      const strengthInv = level.strength < 30 ? 0.7
+        : level.strength < 50 ? 0.3
+        : level.strength < 70 ? -0.1
+        : level.strength < 85 ? -0.4
+        : -0.8;
+      factors.push({
+        name: 'Level Weakness',
+        value: strengthInv,
+        weight: 0.1,
+        detail: `Strength ${level.strength.toFixed(0)} — ${
+          level.strength >= 70 ? 'strong, hard to break' :
+          level.strength >= 40 ? 'moderate' : 'weak, easy to break'
+        }`,
+      });
+
+      // ── Factor 7: Previously broken ──
+      const brokenFactor = level.broken ? 0.6 : -0.2;
+      factors.push({
+        name: 'Break History',
+        value: brokenFactor,
+        weight: 0.08,
+        detail: level.broken ? 'Previously broken — weaker on retest' : 'Never broken — virgin level',
+      });
+
+      // ── Factor 8: RSI alignment ──
+      // RSI > 70 approaching ceiling = momentum could push through (or exhaust)
+      // RSI < 30 approaching floor = could break (or bounce)
+      let rsiFactor = 0;
+      if (level.type === 'ceiling') {
+        rsiFactor = currentRSI > 70 ? 0.5      // overbought + approaching ceiling → could push through
+          : currentRSI > 60 ? 0.2               // bullish but not extreme
+          : currentRSI < 40 ? -0.5              // bearish, won't reach ceiling easily
+          : 0;
+      } else {
+        rsiFactor = currentRSI < 30 ? 0.5       // oversold + approaching floor → could break down
+          : currentRSI < 40 ? 0.2
+          : currentRSI > 60 ? -0.5              // bullish, not going down
+          : 0;
+      }
+      factors.push({
+        name: 'RSI Signal',
+        value: rsiFactor,
+        weight: 0.05,
+        detail: `RSI ${currentRSI.toFixed(0)} — ${
+          currentRSI > 70 ? 'overbought' : currentRSI < 30 ? 'oversold' : 'neutral'
+        }`,
+      });
+
+      // ── Factor 9: Cross-TF confluence (inverse — harder to break) ──
+      let confluenceFactor = 0;
+      for (const [, cl] of confluentPrices) {
+        if (cl.type === level.type) {
+          const diff = Math.abs(cl.price - level.price) / level.price * 100;
+          if (diff < 0.3) { // same level
+            confluenceFactor = -(cl.timeframes.length * 0.2); // more TFs = harder to break
+            break;
+          }
+        }
+      }
+      confluenceFactor = Math.max(-1, Math.min(0, confluenceFactor));
+      factors.push({
+        name: 'Multi-TF',
+        value: confluenceFactor,
+        weight: 0.05,
+        detail: confluenceFactor < -0.2
+          ? 'Confirmed across timeframes — harder to break'
+          : 'Single timeframe level',
+      });
+
+      // ── Compute weighted break probability ──
+      let weightedSum = 0;
+      let totalWeight = 0;
+      for (const f of factors) {
+        weightedSum += f.value * f.weight;
+        totalWeight += f.weight;
+      }
+      const rawScore = totalWeight > 0 ? weightedSum / totalWeight : 0; // -1 to +1
+
+      // Map to 0-100 probability
+      const breakProbability = Math.max(0, Math.min(100, (rawScore + 1) * 50));
+      const holdProbability = 100 - breakProbability;
+
+      // Confidence: higher when factors agree (low variance)
+      const factorValues = factors.map(f => f.value);
+      const mean = factorValues.reduce((s, v) => s + v, 0) / factorValues.length;
+      const variance = factorValues.reduce((s, v) => s + (v - mean) ** 2, 0) / factorValues.length;
+      const confidence = Math.max(15, Math.min(95, 80 - variance * 100));
+
+      // Verdict
+      const verdict: BreakPrediction['verdict'] =
+        breakProbability >= 62 ? 'LIKELY BREAK'
+        : breakProbability <= 38 ? 'LIKELY HOLD'
+        : 'UNCERTAIN';
+
+      // ETA: rough guess based on distance and ATR
+      const candlesToLevel = currentATR > 0
+        ? Math.ceil(level.distanceFromPrice / currentATR)
+        : 0;
+      const eta = candlesToLevel <= 1 ? '⚡ Imminent'
+        : candlesToLevel <= 3 ? `~${candlesToLevel} candles`
+        : candlesToLevel <= 10 ? `~${candlesToLevel} candles`
+        : `${candlesToLevel}+ candles`;
+
+      predictions.push({
+        level,
+        tf: tfData.tf,
+        breakProbability,
+        holdProbability,
+        verdict,
+        confidence,
+        factors,
+        eta,
+      });
+    }
+  }
+
+  // Sort by break probability descending (most likely to break first)
+  predictions.sort((a, b) => b.breakProbability - a.breakProbability);
+
+  const mostLikelyBreak = predictions.length > 0 ? predictions[0] : null;
+  const mostLikelyHold = predictions.length > 0 ? predictions[predictions.length - 1] : null;
+
+  const nearestFloorPrediction = predictions.find(p => p.level.type === 'floor') ?? null;
+  const nearestCeilingPrediction = predictions.find(p =>
+    p.level.type === 'ceiling'
+  ) ?? null;
+
+  // Overall bias: are ceilings or floors more at risk?
+  const floorPreds = predictions.filter(p => p.level.type === 'floor');
+  const ceilingPreds = predictions.filter(p => p.level.type === 'ceiling');
+  const avgFloorBreak = floorPreds.length > 0
+    ? floorPreds.reduce((s, p) => s + p.breakProbability, 0) / floorPreds.length : 50;
+  const avgCeilingBreak = ceilingPreds.length > 0
+    ? ceilingPreds.reduce((s, p) => s + p.breakProbability, 0) / ceilingPreds.length : 50;
+
+  let overallBias: BreakPredictionSummary['overallBias'] = 'indeterminate';
+  let biasSummary = '';
+
+  if (avgCeilingBreak >= 60 && avgCeilingBreak > avgFloorBreak + 10) {
+    overallBias = 'breaking-up';
+    biasSummary = `Ceilings under pressure (${avgCeilingBreak.toFixed(0)}% avg break prob) — likely breakout UP`;
+  } else if (avgFloorBreak >= 60 && avgFloorBreak > avgCeilingBreak + 10) {
+    overallBias = 'breaking-down';
+    biasSummary = `Floors under pressure (${avgFloorBreak.toFixed(0)}% avg break prob) — likely breakdown DOWN`;
+  } else if (avgFloorBreak < 45 && avgCeilingBreak < 45) {
+    overallBias = 'range-bound';
+    biasSummary = `Both floors and ceilings holding — range-bound price action`;
+  } else {
+    overallBias = 'indeterminate';
+    biasSummary = `Mixed signals — floor break ${avgFloorBreak.toFixed(0)}%, ceiling break ${avgCeilingBreak.toFixed(0)}%`;
+  }
+
+  return {
+    predictions,
+    mostLikelyBreak,
+    mostLikelyHold,
+    nearestFloorPrediction,
+    nearestCeilingPrediction,
+    overallBias,
+    biasSummary,
+  };
+}
+
 // ─── Master Analysis Function ───────────────────────────────────────────────
 
 /**
@@ -545,6 +918,9 @@ export function analyzeFloorsCeilings(
   // ── Cross-TF confluence ──
   const confluenceLevels = findConfluentLevels(timeframes, cfg.clusterTolerancePct);
 
+  // ── Break predictions ──
+  const breakPredictions = predictBreaks(candles, timeframes, confluenceLevels, htfCandles);
+
   // ── Global strongest floor/ceiling ──
   // Weight higher TFs more heavily for global levels
   const tfWeightMap: Record<string, number> = {
@@ -605,6 +981,7 @@ export function analyzeFloorsCeilings(
     currentPrice,
     priceInRange: Math.max(0, Math.min(100, priceInRange)),
     bias,
+    breakPredictions,
   };
 }
 

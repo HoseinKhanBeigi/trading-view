@@ -23,7 +23,7 @@ import {
 import type { ShadowPattern, ShadowClusterZone, StopHuntEvent, ShadowAnalysisResult } from "@/lib/shadow-analysis";
 import type { AMDAnalysisResult, AMDPhase, AMDEntrySignal, FourHourRoadmap, ManipulationEvent } from "@/lib/amd-strategy";
 import type { FractalAnalysisResult, FractalPoint, FractalLevel, FractalBreakout, AlligatorState, FractalDimension } from "@/lib/fractal-analysis";
-import type { FloorCeilingAnalysis, FloorCeilingLevel, TimeframeFloorCeiling, ConfluentLevel, HTFCandleMap } from "@/lib/floor-ceiling";
+import type { FloorCeilingAnalysis, FloorCeilingLevel, TimeframeFloorCeiling, ConfluentLevel, HTFCandleMap, BreakPrediction, BreakPredictionSummary } from "@/lib/floor-ceiling";
 import { fetchKlines, type BinanceInterval } from "@/lib/binance";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -2415,6 +2415,214 @@ export default function ScalpDashboard() {
               </div>
             </div>
 
+            {/* ▓▓ BREAK PREDICTION PANEL ▓▓ */}
+            {r.floorCeiling.breakPredictions.predictions.length > 0 && (() => {
+              const bp = r.floorCeiling.breakPredictions;
+              return (
+                <div className={`rounded-xl p-2.5 ${
+                  bp.overallBias === 'breaking-up'
+                    ? 'bg-gradient-to-r from-cyan-950/40 to-emerald-950/30 ring-1 ring-cyan-500/30'
+                    : bp.overallBias === 'breaking-down'
+                    ? 'bg-gradient-to-r from-orange-950/40 to-rose-950/30 ring-1 ring-orange-500/30'
+                    : bp.overallBias === 'range-bound'
+                    ? 'bg-gradient-to-r from-zinc-900/60 to-zinc-800/30 ring-1 ring-zinc-600/30'
+                    : 'bg-gradient-to-r from-purple-950/30 to-zinc-900/30 ring-1 ring-purple-600/30'
+                }`}>
+                  <div className="text-[8px] uppercase font-bold tracking-wider text-amber-400 mb-2">
+                    🔮 Break Prediction Engine
+                  </div>
+
+                  {/* Overall bias banner */}
+                  <div className={`text-center mb-2 py-1.5 rounded-lg ${
+                    bp.overallBias === 'breaking-up'
+                      ? 'bg-cyan-900/30 text-cyan-300'
+                      : bp.overallBias === 'breaking-down'
+                      ? 'bg-orange-900/30 text-orange-300'
+                      : bp.overallBias === 'range-bound'
+                      ? 'bg-zinc-800/40 text-zinc-300'
+                      : 'bg-purple-900/20 text-purple-300'
+                  }`}>
+                    <div className="text-[11px] font-bold">
+                      {bp.overallBias === 'breaking-up' && '🚀 CEILING BREAK LIKELY'}
+                      {bp.overallBias === 'breaking-down' && '💥 FLOOR BREAK LIKELY'}
+                      {bp.overallBias === 'range-bound' && '🔒 RANGE BOUND — Levels Holding'}
+                      {bp.overallBias === 'indeterminate' && '🔄 MIXED SIGNALS'}
+                    </div>
+                    <div className="text-[8px] opacity-70 mt-0.5">{bp.biasSummary}</div>
+                  </div>
+
+                  {/* Nearest floor + ceiling predictions side by side */}
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    {/* Nearest Ceiling Prediction */}
+                    {bp.nearestCeilingPrediction && (() => {
+                      const p = bp.nearestCeilingPrediction;
+                      return (
+                        <div className="rounded-lg bg-rose-950/20 ring-1 ring-rose-800/20 p-2">
+                          <div className="text-[7px] uppercase tracking-wider text-rose-500/80 font-bold mb-1">
+                            Nearest Ceiling
+                          </div>
+                          <div className="text-[10px] font-mono font-bold text-rose-300">
+                            {formatPrice(p.level.price)}
+                            <span className="text-[7px] text-zinc-500 ml-1">{p.tf}</span>
+                          </div>
+                          <div className="flex items-center gap-1 mt-1">
+                            <div className="flex-1 h-2 bg-zinc-800/60 rounded-full overflow-hidden relative">
+                              <div
+                                className={`h-full rounded-full transition-all ${
+                                  p.breakProbability >= 60 ? 'bg-gradient-to-r from-rose-600 to-rose-400'
+                                  : p.breakProbability >= 40 ? 'bg-gradient-to-r from-amber-700 to-amber-500'
+                                  : 'bg-gradient-to-r from-emerald-700 to-emerald-500'
+                                }`}
+                                style={{ width: `${p.breakProbability}%` }}
+                              />
+                            </div>
+                            <span className={`text-[9px] font-bold font-mono ${
+                              p.breakProbability >= 60 ? 'text-rose-400'
+                              : p.breakProbability >= 40 ? 'text-amber-400'
+                              : 'text-emerald-400'
+                            }`}>{p.breakProbability.toFixed(0)}%</span>
+                          </div>
+                          <div className={`text-[8px] mt-1 font-bold text-center py-0.5 rounded ${
+                            p.verdict === 'LIKELY BREAK' ? 'bg-rose-900/40 text-rose-300'
+                            : p.verdict === 'LIKELY HOLD' ? 'bg-emerald-900/40 text-emerald-300'
+                            : 'bg-zinc-800/40 text-zinc-400'
+                          }`}>
+                            {p.verdict === 'LIKELY BREAK' ? '⚠️' : p.verdict === 'LIKELY HOLD' ? '🛡️' : '❓'} {p.verdict}
+                          </div>
+                          <div className="text-[7px] text-zinc-500 text-center mt-0.5">
+                            {p.eta} • conf {p.confidence.toFixed(0)}%
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Nearest Floor Prediction */}
+                    {bp.nearestFloorPrediction && (() => {
+                      const p = bp.nearestFloorPrediction;
+                      return (
+                        <div className="rounded-lg bg-emerald-950/20 ring-1 ring-emerald-800/20 p-2">
+                          <div className="text-[7px] uppercase tracking-wider text-emerald-500/80 font-bold mb-1">
+                            Nearest Floor
+                          </div>
+                          <div className="text-[10px] font-mono font-bold text-emerald-300">
+                            {formatPrice(p.level.price)}
+                            <span className="text-[7px] text-zinc-500 ml-1">{p.tf}</span>
+                          </div>
+                          <div className="flex items-center gap-1 mt-1">
+                            <div className="flex-1 h-2 bg-zinc-800/60 rounded-full overflow-hidden relative">
+                              <div
+                                className={`h-full rounded-full transition-all ${
+                                  p.breakProbability >= 60 ? 'bg-gradient-to-r from-rose-600 to-rose-400'
+                                  : p.breakProbability >= 40 ? 'bg-gradient-to-r from-amber-700 to-amber-500'
+                                  : 'bg-gradient-to-r from-emerald-700 to-emerald-500'
+                                }`}
+                                style={{ width: `${p.breakProbability}%` }}
+                              />
+                            </div>
+                            <span className={`text-[9px] font-bold font-mono ${
+                              p.breakProbability >= 60 ? 'text-rose-400'
+                              : p.breakProbability >= 40 ? 'text-amber-400'
+                              : 'text-emerald-400'
+                            }`}>{p.breakProbability.toFixed(0)}%</span>
+                          </div>
+                          <div className={`text-[8px] mt-1 font-bold text-center py-0.5 rounded ${
+                            p.verdict === 'LIKELY BREAK' ? 'bg-rose-900/40 text-rose-300'
+                            : p.verdict === 'LIKELY HOLD' ? 'bg-emerald-900/40 text-emerald-300'
+                            : 'bg-zinc-800/40 text-zinc-400'
+                          }`}>
+                            {p.verdict === 'LIKELY BREAK' ? '⚠️' : p.verdict === 'LIKELY HOLD' ? '🛡️' : '❓'} {p.verdict}
+                          </div>
+                          <div className="text-[7px] text-zinc-500 text-center mt-0.5">
+                            {p.eta} • conf {p.confidence.toFixed(0)}%
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* All predictions list (top 6) */}
+                  <div className="text-[7px] uppercase font-bold tracking-wider text-zinc-500 mb-1">
+                    All Predictions ({bp.predictions.length} levels)
+                  </div>
+                  <div className="space-y-0.5 max-h-48 overflow-y-auto">
+                    {bp.predictions.slice(0, 8).map((p, i) => (
+                      <div key={i} className={`flex items-center gap-1.5 text-[9px] px-1.5 py-1 rounded-lg ${
+                        p.verdict === 'LIKELY BREAK' ? 'bg-rose-950/20' :
+                        p.verdict === 'LIKELY HOLD' ? 'bg-emerald-950/10' : 'bg-zinc-900/20'
+                      }`}>
+                        <span className={`text-[8px] font-mono px-1 py-0.5 rounded ${
+                          p.level.type === 'floor' ? 'bg-emerald-900/30 text-emerald-400' : 'bg-rose-900/30 text-rose-400'
+                        }`}>{p.level.type === 'floor' ? '▼ FLR' : '▲ CLG'}</span>
+                        <span className="font-mono font-bold text-zinc-200 w-20">{formatPrice(p.level.price)}</span>
+                        <span className="text-[7px] text-zinc-600 w-8">{p.tf}</span>
+                        <div className="flex-1 h-1.5 bg-zinc-800/40 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${
+                              p.breakProbability >= 60 ? 'bg-rose-500/70'
+                              : p.breakProbability >= 40 ? 'bg-amber-500/60'
+                              : 'bg-emerald-500/60'
+                            }`}
+                            style={{ width: `${p.breakProbability}%` }}
+                          />
+                        </div>
+                        <span className={`text-[8px] font-mono font-bold w-8 text-right ${
+                          p.breakProbability >= 60 ? 'text-rose-400'
+                          : p.breakProbability >= 40 ? 'text-amber-400'
+                          : 'text-emerald-400'
+                        }`}>{p.breakProbability.toFixed(0)}%</span>
+                        <span className={`text-[7px] px-1 py-0.5 rounded font-bold ${
+                          p.verdict === 'LIKELY BREAK' ? 'bg-rose-900/40 text-rose-300'
+                          : p.verdict === 'LIKELY HOLD' ? 'bg-emerald-900/40 text-emerald-300'
+                          : 'bg-zinc-800/40 text-zinc-500'
+                        }`}>
+                          {p.verdict === 'LIKELY BREAK' ? 'BRK' : p.verdict === 'LIKELY HOLD' ? 'HLD' : '???'}
+                        </span>
+                        <span className="text-[7px] text-zinc-600 w-14 text-right">{p.eta}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Factor breakdown for most-likely-to-break level */}
+                  {bp.mostLikelyBreak && bp.mostLikelyBreak.breakProbability >= 55 && (
+                    <div className="mt-2 rounded-lg bg-zinc-900/40 ring-1 ring-zinc-800/30 p-2">
+                      <div className="text-[7px] uppercase font-bold tracking-wider text-amber-500 mb-1">
+                        📊 Top Break Risk: {formatPrice(bp.mostLikelyBreak.level.price)} ({bp.mostLikelyBreak.level.type === 'floor' ? 'Floor' : 'Ceiling'}, {bp.mostLikelyBreak.tf})
+                      </div>
+                      <div className="space-y-0.5">
+                        {bp.mostLikelyBreak.factors
+                          .sort((a, b) => Math.abs(b.value * b.weight) - Math.abs(a.value * a.weight))
+                          .slice(0, 5)
+                          .map((f, i) => (
+                          <div key={i} className="flex items-center gap-1 text-[8px]">
+                            <span className={`w-1.5 h-1.5 rounded-full ${
+                              f.value > 0.3 ? 'bg-rose-400' : f.value < -0.3 ? 'bg-emerald-400' : 'bg-zinc-500'
+                            }`} />
+                            <span className="text-zinc-400 w-16">{f.name}</span>
+                            <div className="flex-1 h-1 bg-zinc-800/40 rounded-full overflow-hidden relative">
+                              {/* Center line */}
+                              <div className="absolute left-1/2 top-0 w-px h-full bg-zinc-600" />
+                              {f.value >= 0 ? (
+                                <div
+                                  className="absolute top-0 h-full bg-rose-500/60 rounded-r-full"
+                                  style={{ left: '50%', width: `${Math.abs(f.value) * 50}%` }}
+                                />
+                              ) : (
+                                <div
+                                  className="absolute top-0 h-full bg-emerald-500/60 rounded-l-full"
+                                  style={{ right: '50%', width: `${Math.abs(f.value) * 50}%` }}
+                                />
+                              )}
+                            </div>
+                            <span className="text-[7px] text-zinc-500 w-28 text-right truncate">{f.detail}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* ▓▓ CONFLUENT LEVELS (appear on multiple TFs) ▓▓ */}
             {r.floorCeiling.confluenceLevels.length > 0 && (
               <div className="rounded-xl bg-violet-950/20 ring-1 ring-violet-500/20 p-2.5">
@@ -2483,7 +2691,11 @@ export default function ScalpDashboard() {
                   <div className="mb-1.5">
                     <div className="text-[7px] uppercase tracking-wider text-rose-500/80 font-bold mb-0.5">Ceilings ▲</div>
                     <div className="space-y-0.5">
-                      {tfData.ceilings.slice(0, 4).map((level, i) => (
+                      {tfData.ceilings.slice(0, 4).map((level, i) => {
+                        const pred = r.floorCeiling.breakPredictions.predictions.find(
+                          p => p.tf === tfData.tf && Math.abs(p.level.price - level.price) / level.price < 0.001
+                        );
+                        return (
                         <div key={i} className="flex items-center gap-1.5 text-[9px]">
                           <span className={`w-1.5 h-1.5 rounded-full ${
                             level.strength >= 70 ? 'bg-rose-400' : level.strength >= 40 ? 'bg-rose-500/60' : 'bg-rose-600/40'
@@ -2505,8 +2717,18 @@ export default function ScalpDashboard() {
                           {level.broken && (
                             <span className="text-[6px] px-0.5 rounded bg-zinc-800 text-zinc-500">BRK</span>
                           )}
+                          {pred && (
+                            <span className={`text-[6px] px-1 py-0.5 rounded font-bold ${
+                              pred.verdict === 'LIKELY BREAK' ? 'bg-rose-900/50 text-rose-300'
+                              : pred.verdict === 'LIKELY HOLD' ? 'bg-emerald-900/50 text-emerald-300'
+                              : 'bg-zinc-800 text-zinc-400'
+                            }`} title={`Break: ${pred.breakProbability.toFixed(0)}% | ${pred.eta}`}>
+                              🔮{pred.breakProbability.toFixed(0)}%
+                            </span>
+                          )}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -2524,7 +2746,11 @@ export default function ScalpDashboard() {
                   <div>
                     <div className="text-[7px] uppercase tracking-wider text-emerald-500/80 font-bold mb-0.5">Floors ▼</div>
                     <div className="space-y-0.5">
-                      {tfData.floors.slice(0, 4).map((level, i) => (
+                      {tfData.floors.slice(0, 4).map((level, i) => {
+                        const pred = r.floorCeiling.breakPredictions.predictions.find(
+                          p => p.tf === tfData.tf && Math.abs(p.level.price - level.price) / level.price < 0.001
+                        );
+                        return (
                         <div key={i} className="flex items-center gap-1.5 text-[9px]">
                           <span className={`w-1.5 h-1.5 rounded-full ${
                             level.strength >= 70 ? 'bg-emerald-400' : level.strength >= 40 ? 'bg-emerald-500/60' : 'bg-emerald-600/40'
@@ -2546,8 +2772,18 @@ export default function ScalpDashboard() {
                           {level.broken && (
                             <span className="text-[6px] px-0.5 rounded bg-zinc-800 text-zinc-500">BRK</span>
                           )}
+                          {pred && (
+                            <span className={`text-[6px] px-1 py-0.5 rounded font-bold ${
+                              pred.verdict === 'LIKELY BREAK' ? 'bg-rose-900/50 text-rose-300'
+                              : pred.verdict === 'LIKELY HOLD' ? 'bg-emerald-900/50 text-emerald-300'
+                              : 'bg-zinc-800 text-zinc-400'
+                            }`} title={`Break: ${pred.breakProbability.toFixed(0)}% | ${pred.eta}`}>
+                              🔮{pred.breakProbability.toFixed(0)}%
+                            </span>
+                          )}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}
