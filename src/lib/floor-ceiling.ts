@@ -1,6 +1,7 @@
 import type { CandlestickData } from "lightweight-charts";
 import { detectSwingPoints, type SwingPoint } from "./price-action";
 import { ema, rsi, atr as calcATR } from "./indicators";
+import { detectAllCandlestickPatterns, type CandlestickPattern } from "./candlestick-patterns";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MULTI-TIMEFRAME FLOOR & CEILING DETECTION + BREAK PREDICTION
@@ -67,6 +68,44 @@ export type BreakPredictionSummary = {
   biasSummary: string;           // human-readable prediction summary
 };
 
+// ─── Level Entry Signal Types ──────────────────────────────────────────────
+
+export type LevelSignalType =
+  | 'BOUNCE_LONG'       // Price at strong floor + bullish confirmation → BUY
+  | 'BOUNCE_SHORT'      // Price at strong ceiling + bearish confirmation → SELL
+  | 'BREAKOUT_LONG'     // Price breaks above ceiling + strong momentum → BUY
+  | 'BREAKDOWN_SHORT';  // Price breaks below floor + strong momentum → SELL
+
+export type LevelSignal = {
+  id: string;                    // unique id for dedup
+  type: LevelSignalType;
+  direction: 'LONG' | 'SHORT';
+  grade: 'A+' | 'A' | 'B' | 'C';  // quality grade
+  level: FloorCeilingLevel;      // the floor/ceiling involved
+  tf: string;                    // timeframe of the level
+  entry: number;                 // suggested entry price
+  stopLoss: number;              // stop-loss price
+  takeProfit: number;            // primary take-profit
+  takeProfit2: number | null;    // secondary TP
+  riskReward: number;            // risk:reward ratio
+  confidence: number;            // 0-100
+  confirmationPattern: string;   // candle pattern that confirmed (e.g. "Hammer", "Bullish Engulfing")
+  breakPrediction: BreakPrediction | null; // associated break prediction
+  reasons: string[];             // human-readable list of why this signal fired
+  timestamp: number;             // when signal was generated
+  price: number;                 // current price at signal time
+  active: boolean;               // still valid?
+  invalidationPrice: number;     // price that invalidates signal
+};
+
+export type LevelSignalSummary = {
+  signals: LevelSignal[];        // active signals sorted by grade
+  bestSignal: LevelSignal | null;  // highest grade signal
+  activeCount: number;
+  longCount: number;
+  shortCount: number;
+};
+
 // ─── Main Types ────────────────────────────────────────────────────────────
 
 export type FloorCeilingAnalysis = {
@@ -81,6 +120,8 @@ export type FloorCeilingAnalysis = {
   bias: 'near-floor-bounce' | 'near-ceiling-reject' | 'mid-range' | 'breakout-up' | 'breakdown';
   // Break predictions
   breakPredictions: BreakPredictionSummary;
+  // Entry signals
+  levelSignals: LevelSignalSummary;
 };
 
 export type ConfluentLevel = {
@@ -830,6 +871,345 @@ function predictBreaks(
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// LEVEL ENTRY SIGNAL GENERATOR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Generate entry signals when price reaches a strong level with candle confirmation.
+ *
+ * Signal types:
+ *   BOUNCE_LONG     — Price at floor + bullish candle (hammer, engulfing, pin bar)
+ *   BOUNCE_SHORT    — Price at ceiling + bearish candle (shooting star, engulfing, pin bar)
+ *   BREAKOUT_LONG   — Strong close above ceiling + momentum candle + LIKELY BREAK
+ *   BREAKDOWN_SHORT — Strong close below floor + momentum candle + LIKELY BREAK
+ *
+ * Each signal includes: entry, SL, TP, R:R, grade, and confidence.
+ */
+function generateLevelSignals(
+  candles: CandlestickData[],
+  timeframes: TimeframeFloorCeiling[],
+  breakPredictions: BreakPredictionSummary,
+  confluenceLevels: ConfluentLevel[],
+  htfCandles: HTFCandleMap,
+): LevelSignalSummary {
+  const empty: LevelSignalSummary = {
+    signals: [],
+    bestSignal: null,
+    activeCount: 0,
+    longCount: 0,
+    shortCount: 0,
+  };
+
+  if (candles.length < 20) return empty;
+
+  const currentPrice = candles[candles.length - 1].close;
+  const lastCandle = candles[candles.length - 1];
+  const prevCandle = candles[candles.length - 2];
+
+  // ATR for SL/TP calculation
+  const atrValues = calcATR(candles, 14);
+  const currentATR = atrValues[candles.length - 1] ?? 0;
+  if (currentATR <= 0) return empty;
+
+  // Detect candle patterns on last few candles
+  const recentPatterns = detectAllCandlestickPatterns(candles, 3);
+  const lastCandlePatterns = recentPatterns.filter(
+    p => p.index >= candles.length - 2 // patterns involving the last 1-2 candles
+  );
+
+  // Bullish confirmation patterns
+  const bullishPatterns = lastCandlePatterns.filter(p => p.type === 'bullish');
+  const bearishPatterns = lastCandlePatterns.filter(p => p.type === 'bearish');
+
+  // Also check for simple "rejection candle" even without named patterns
+  const lastBody = Math.abs(lastCandle.close - lastCandle.open);
+  const lastRange = lastCandle.high - lastCandle.low;
+  const lastLowerWick = Math.min(lastCandle.open, lastCandle.close) - lastCandle.low;
+  const lastUpperWick = lastCandle.high - Math.max(lastCandle.open, lastCandle.close);
+  const isBullishRejection = lastRange > 0 && lastLowerWick > lastRange * 0.5 && lastCandle.close > lastCandle.open;
+  const isBearishRejection = lastRange > 0 && lastUpperWick > lastRange * 0.5 && lastCandle.close < lastCandle.open;
+
+  // Strong momentum candle check (for breakout signals)
+  const isBullishMomentum = lastCandle.close > lastCandle.open && lastBody > currentATR * 0.8;
+  const isBearishMomentum = lastCandle.close < lastCandle.open && lastBody > currentATR * 0.8;
+
+  // Check if close is a breakout (close above previous high or below previous low)
+  const prevHigh = prevCandle.high;
+  const prevLow = prevCandle.low;
+
+  // Build confluent price set for bonus scoring
+  const confluentPriceSet = new Set(confluenceLevels.map(cl => cl.price.toFixed(2)));
+
+  const signals: LevelSignal[] = [];
+  const now = Date.now();
+
+  for (const tfData of timeframes) {
+    // ── Check FLOORS for bounce/breakdown signals ──
+    for (const floor of tfData.floors.slice(0, 3)) {
+      const isNear = floor.distancePct < 0.3; // within 0.3% of the level
+      const isTouching = currentPrice <= floor.zone.high * 1.001 && currentPrice >= floor.zone.low * 0.998;
+      const pred = breakPredictions.predictions.find(
+        p => p.tf === tfData.tf && Math.abs(p.level.price - floor.price) / floor.price < 0.001
+      );
+
+      // ── BOUNCE LONG: at floor + bullish confirmation + LIKELY HOLD ──
+      if ((isNear || isTouching) && (bullishPatterns.length > 0 || isBullishRejection)) {
+        const confirmName = bullishPatterns.length > 0
+          ? bullishPatterns.sort((a, b) => (b.strength === 'strong' ? 2 : b.strength === 'medium' ? 1 : 0) - (a.strength === 'strong' ? 2 : a.strength === 'medium' ? 1 : 0))[0].name
+          : 'Bullish Wick Rejection';
+
+        const sl = floor.zone.low - currentATR * 0.5;
+        const risk = currentPrice - sl;
+        const tp1 = currentPrice + risk * 2;
+        const tp2 = currentPrice + risk * 3;
+        const rr = risk > 0 ? (tp1 - currentPrice) / risk : 0;
+
+        // Grade based on factors
+        let gradeScore = 0;
+        if (floor.strength >= 70) gradeScore += 3;
+        else if (floor.strength >= 50) gradeScore += 2;
+        else gradeScore += 1;
+        if (pred && pred.holdProbability >= 60) gradeScore += 2;
+        if (bullishPatterns.some(p => p.strength === 'strong')) gradeScore += 2;
+        if (confluentPriceSet.has(floor.price.toFixed(2))) gradeScore += 2;
+        if (rr >= 2) gradeScore += 1;
+
+        const grade: LevelSignal['grade'] = gradeScore >= 8 ? 'A+' : gradeScore >= 6 ? 'A' : gradeScore >= 4 ? 'B' : 'C';
+        const confidence = Math.min(95, 30 + gradeScore * 8);
+
+        const reasons: string[] = [];
+        reasons.push(`Price at ${tfData.tf} floor (${floor.price.toFixed(2)})`);
+        reasons.push(`Confirmation: ${confirmName}`);
+        if (pred) reasons.push(`Hold probability: ${pred.holdProbability.toFixed(0)}%`);
+        if (floor.strength >= 60) reasons.push(`Strong level (${floor.strength.toFixed(0)})`);
+        if (confluentPriceSet.has(floor.price.toFixed(2))) reasons.push('Multi-TF confluence');
+
+        signals.push({
+          id: `BL-${tfData.tf}-${floor.price.toFixed(2)}-${now}`,
+          type: 'BOUNCE_LONG',
+          direction: 'LONG',
+          grade,
+          level: floor,
+          tf: tfData.tf,
+          entry: currentPrice,
+          stopLoss: sl,
+          takeProfit: tp1,
+          takeProfit2: tp2,
+          riskReward: rr,
+          confidence,
+          confirmationPattern: confirmName,
+          breakPrediction: pred ?? null,
+          reasons,
+          timestamp: now,
+          price: currentPrice,
+          active: true,
+          invalidationPrice: sl,
+        });
+      }
+
+      // ── BREAKDOWN SHORT: price closes below floor + bearish momentum + LIKELY BREAK ──
+      const brokeBelow = lastCandle.close < floor.zone.low * 0.999 && prevCandle.close >= floor.zone.low * 0.999;
+      if (brokeBelow && (isBearishMomentum || bearishPatterns.length > 0)) {
+        const confirmName = bearishPatterns.length > 0
+          ? bearishPatterns[0].name
+          : 'Bearish Momentum Candle';
+
+        const sl = floor.zone.high + currentATR * 0.5;
+        const risk = sl - currentPrice;
+        const tp1 = currentPrice - risk * 2;
+        const tp2 = currentPrice - risk * 3;
+        const rr = risk > 0 ? (currentPrice - tp1) / risk : 0;
+
+        let gradeScore = 0;
+        if (floor.strength < 40) gradeScore += 2; // weak floor = easier break
+        if (pred && pred.breakProbability >= 60) gradeScore += 3;
+        if (isBearishMomentum) gradeScore += 2;
+        if (lastBody > currentATR) gradeScore += 1;
+        if (rr >= 2) gradeScore += 1;
+
+        const grade: LevelSignal['grade'] = gradeScore >= 7 ? 'A+' : gradeScore >= 5 ? 'A' : gradeScore >= 3 ? 'B' : 'C';
+        const confidence = Math.min(90, 25 + gradeScore * 8);
+
+        const reasons: string[] = [];
+        reasons.push(`Price broke below ${tfData.tf} floor (${floor.price.toFixed(2)})`);
+        reasons.push(`Confirmation: ${confirmName}`);
+        if (pred) reasons.push(`Break probability: ${pred.breakProbability.toFixed(0)}%`);
+        if (floor.touches >= 3) reasons.push(`Weakened by ${floor.touches} touches`);
+
+        signals.push({
+          id: `BD-${tfData.tf}-${floor.price.toFixed(2)}-${now}`,
+          type: 'BREAKDOWN_SHORT',
+          direction: 'SHORT',
+          grade,
+          level: floor,
+          tf: tfData.tf,
+          entry: currentPrice,
+          stopLoss: sl,
+          takeProfit: tp1,
+          takeProfit2: tp2,
+          riskReward: rr,
+          confidence,
+          confirmationPattern: confirmName,
+          breakPrediction: pred ?? null,
+          reasons,
+          timestamp: now,
+          price: currentPrice,
+          active: true,
+          invalidationPrice: sl,
+        });
+      }
+    }
+
+    // ── Check CEILINGS for bounce/breakout signals ──
+    for (const ceiling of tfData.ceilings.slice(0, 3)) {
+      const isNear = ceiling.distancePct < 0.3;
+      const isTouching = currentPrice >= ceiling.zone.low * 0.999 && currentPrice <= ceiling.zone.high * 1.001;
+      const pred = breakPredictions.predictions.find(
+        p => p.tf === tfData.tf && Math.abs(p.level.price - ceiling.price) / ceiling.price < 0.001
+      );
+
+      // ── BOUNCE SHORT: at ceiling + bearish confirmation + LIKELY HOLD ──
+      if ((isNear || isTouching) && (bearishPatterns.length > 0 || isBearishRejection)) {
+        const confirmName = bearishPatterns.length > 0
+          ? bearishPatterns.sort((a, b) => (b.strength === 'strong' ? 2 : b.strength === 'medium' ? 1 : 0) - (a.strength === 'strong' ? 2 : a.strength === 'medium' ? 1 : 0))[0].name
+          : 'Bearish Wick Rejection';
+
+        const sl = ceiling.zone.high + currentATR * 0.5;
+        const risk = sl - currentPrice;
+        const tp1 = currentPrice - risk * 2;
+        const tp2 = currentPrice - risk * 3;
+        const rr = risk > 0 ? (currentPrice - tp1) / risk : 0;
+
+        let gradeScore = 0;
+        if (ceiling.strength >= 70) gradeScore += 3;
+        else if (ceiling.strength >= 50) gradeScore += 2;
+        else gradeScore += 1;
+        if (pred && pred.holdProbability >= 60) gradeScore += 2;
+        if (bearishPatterns.some(p => p.strength === 'strong')) gradeScore += 2;
+        if (confluentPriceSet.has(ceiling.price.toFixed(2))) gradeScore += 2;
+        if (rr >= 2) gradeScore += 1;
+
+        const grade: LevelSignal['grade'] = gradeScore >= 8 ? 'A+' : gradeScore >= 6 ? 'A' : gradeScore >= 4 ? 'B' : 'C';
+        const confidence = Math.min(95, 30 + gradeScore * 8);
+
+        const reasons: string[] = [];
+        reasons.push(`Price at ${tfData.tf} ceiling (${ceiling.price.toFixed(2)})`);
+        reasons.push(`Confirmation: ${confirmName}`);
+        if (pred) reasons.push(`Hold probability: ${pred.holdProbability.toFixed(0)}%`);
+        if (ceiling.strength >= 60) reasons.push(`Strong level (${ceiling.strength.toFixed(0)})`);
+        if (confluentPriceSet.has(ceiling.price.toFixed(2))) reasons.push('Multi-TF confluence');
+
+        signals.push({
+          id: `BS-${tfData.tf}-${ceiling.price.toFixed(2)}-${now}`,
+          type: 'BOUNCE_SHORT',
+          direction: 'SHORT',
+          grade,
+          level: ceiling,
+          tf: tfData.tf,
+          entry: currentPrice,
+          stopLoss: sl,
+          takeProfit: tp1,
+          takeProfit2: tp2,
+          riskReward: rr,
+          confidence,
+          confirmationPattern: confirmName,
+          breakPrediction: pred ?? null,
+          reasons,
+          timestamp: now,
+          price: currentPrice,
+          active: true,
+          invalidationPrice: sl,
+        });
+      }
+
+      // ── BREAKOUT LONG: price closes above ceiling + bullish momentum + LIKELY BREAK ──
+      const brokeAbove = lastCandle.close > ceiling.zone.high * 1.001 && prevCandle.close <= ceiling.zone.high * 1.001;
+      if (brokeAbove && (isBullishMomentum || bullishPatterns.length > 0)) {
+        const confirmName = bullishPatterns.length > 0
+          ? bullishPatterns[0].name
+          : 'Bullish Momentum Candle';
+
+        const sl = ceiling.zone.low - currentATR * 0.5;
+        const risk = currentPrice - sl;
+        const tp1 = currentPrice + risk * 2;
+        const tp2 = currentPrice + risk * 3;
+        const rr = risk > 0 ? (tp1 - currentPrice) / risk : 0;
+
+        let gradeScore = 0;
+        if (ceiling.strength < 40) gradeScore += 2;
+        if (pred && pred.breakProbability >= 60) gradeScore += 3;
+        if (isBullishMomentum) gradeScore += 2;
+        if (lastBody > currentATR) gradeScore += 1;
+        if (rr >= 2) gradeScore += 1;
+
+        const grade: LevelSignal['grade'] = gradeScore >= 7 ? 'A+' : gradeScore >= 5 ? 'A' : gradeScore >= 3 ? 'B' : 'C';
+        const confidence = Math.min(90, 25 + gradeScore * 8);
+
+        const reasons: string[] = [];
+        reasons.push(`Price broke above ${tfData.tf} ceiling (${ceiling.price.toFixed(2)})`);
+        reasons.push(`Confirmation: ${confirmName}`);
+        if (pred) reasons.push(`Break probability: ${pred.breakProbability.toFixed(0)}%`);
+        if (ceiling.touches >= 3) reasons.push(`Weakened by ${ceiling.touches} touches`);
+
+        signals.push({
+          id: `BO-${tfData.tf}-${ceiling.price.toFixed(2)}-${now}`,
+          type: 'BREAKOUT_LONG',
+          direction: 'LONG',
+          grade,
+          level: ceiling,
+          tf: tfData.tf,
+          entry: currentPrice,
+          stopLoss: sl,
+          takeProfit: tp1,
+          takeProfit2: tp2,
+          riskReward: rr,
+          confidence,
+          confirmationPattern: confirmName,
+          breakPrediction: pred ?? null,
+          reasons,
+          timestamp: now,
+          price: currentPrice,
+          active: true,
+          invalidationPrice: sl,
+        });
+      }
+    }
+  }
+
+  // Deduplicate: keep highest grade per direction per price zone
+  const deduped = new Map<string, LevelSignal>();
+  for (const sig of signals) {
+    const key = `${sig.direction}-${sig.level.price.toFixed(1)}`;
+    const existing = deduped.get(key);
+    if (!existing || gradeRank(sig.grade) > gradeRank(existing.grade)) {
+      deduped.set(key, sig);
+    }
+  }
+
+  const finalSignals = [...deduped.values()].sort(
+    (a, b) => gradeRank(b.grade) - gradeRank(a.grade) || b.confidence - a.confidence
+  );
+
+  return {
+    signals: finalSignals,
+    bestSignal: finalSignals.length > 0 ? finalSignals[0] : null,
+    activeCount: finalSignals.length,
+    longCount: finalSignals.filter(s => s.direction === 'LONG').length,
+    shortCount: finalSignals.filter(s => s.direction === 'SHORT').length,
+  };
+}
+
+function gradeRank(grade: string): number {
+  switch (grade) {
+    case 'A+': return 4;
+    case 'A': return 3;
+    case 'B': return 2;
+    case 'C': return 1;
+    default: return 0;
+  }
+}
+
 // ─── Master Analysis Function ───────────────────────────────────────────────
 
 /**
@@ -921,6 +1301,9 @@ export function analyzeFloorsCeilings(
   // ── Break predictions ──
   const breakPredictions = predictBreaks(candles, timeframes, confluenceLevels, htfCandles);
 
+  // ── Level entry signals ──
+  const levelSignals = generateLevelSignals(candles, timeframes, breakPredictions, confluenceLevels, htfCandles);
+
   // ── Global strongest floor/ceiling ──
   // Weight higher TFs more heavily for global levels
   const tfWeightMap: Record<string, number> = {
@@ -982,6 +1365,7 @@ export function analyzeFloorsCeilings(
     priceInRange: Math.max(0, Math.min(100, priceInRange)),
     bias,
     breakPredictions,
+    levelSignals,
   };
 }
 

@@ -23,7 +23,7 @@ import {
 import type { ShadowPattern, ShadowClusterZone, StopHuntEvent, ShadowAnalysisResult } from "@/lib/shadow-analysis";
 import type { AMDAnalysisResult, AMDPhase, AMDEntrySignal, FourHourRoadmap, ManipulationEvent } from "@/lib/amd-strategy";
 import type { FractalAnalysisResult, FractalPoint, FractalLevel, FractalBreakout, AlligatorState, FractalDimension } from "@/lib/fractal-analysis";
-import type { FloorCeilingAnalysis, FloorCeilingLevel, TimeframeFloorCeiling, ConfluentLevel, HTFCandleMap, BreakPrediction, BreakPredictionSummary } from "@/lib/floor-ceiling";
+import type { FloorCeilingAnalysis, FloorCeilingLevel, TimeframeFloorCeiling, ConfluentLevel, HTFCandleMap, BreakPrediction, BreakPredictionSummary, LevelSignal, LevelSignalSummary } from "@/lib/floor-ceiling";
 import { fetchKlines, type BinanceInterval } from "@/lib/binance";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -126,6 +126,31 @@ export default function ScalpDashboard() {
   const lastUpdateRef = useRef(0);
   const lastSignalDirRef = useRef<string>('WAIT');
 
+  // ── Level signal alert tracking ──
+  const [levelAlerts, setLevelAlerts] = useState<LevelSignal[]>([]);
+  const [alertsEnabled, setAlertsEnabled] = useState(true);
+  const lastLevelSignalRef = useRef<string>(''); // last signal id to prevent duplicates
+  const levelAlertAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Initialize beep sound (Web Audio)
+  const playAlertBeep = useCallback(() => {
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      // Two-tone beep: high then higher
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.3);
+    } catch { /* Audio not available */ }
+  }, []);
+
   // ── HTF (Higher Timeframe) candle data for floor/ceiling analysis ──
   const [htfCandles, setHtfCandles] = useState<HTFCandleMap>({});
   const htfFetchRef = useRef<string>(''); // tracks symbol to avoid duplicate fetches
@@ -217,8 +242,20 @@ export default function ScalpDashboard() {
         setSignalHistory(prev => prev.map((s, i) => i > 0 ? { ...s, expired: true } : s));
       }
       lastSignalDirRef.current = newDir;
+
+      // ── Track level entry signals (floor/ceiling alerts) ──
+      const ls = strategyResult.floorCeiling.levelSignals;
+      if (ls.bestSignal && ls.bestSignal.id !== lastLevelSignalRef.current && alertsEnabled) {
+        const newSig = ls.bestSignal;
+        lastLevelSignalRef.current = newSig.id;
+        // Only alert for grade B+ and above
+        if (newSig.grade !== 'C') {
+          setLevelAlerts(prev => [newSig, ...prev].slice(0, 30)); // keep last 30
+          playAlertBeep();
+        }
+      }
     }
-  }, [candles, trades, orderBook, tradeHistory, config, symbol, interval, htfCandles]);
+  }, [candles, trades, orderBook, tradeHistory, config, symbol, interval, htfCandles, alertsEnabled, playAlertBeep]);
 
   // Log a trade
   const logTrade = useCallback((res: 'win' | 'loss' | 'breakeven') => {
@@ -2373,6 +2410,183 @@ export default function ScalpDashboard() {
         {/* ── FLOOR/CEILING LEVELS TAB ── */}
         {activeTab === 'levels' && r && (
           <div className="space-y-3">
+            {/* ▓▓ LEVEL ENTRY SIGNALS — ACTIVE ALERTS ▓▓ */}
+            {(() => {
+              const ls = r.floorCeiling.levelSignals;
+              return (
+                <div className="rounded-xl bg-zinc-950/60 ring-1 ring-zinc-700/30 p-2.5">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
+                      ⚡ Level Entry Signals
+                      {ls.activeCount > 0 && (
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-900/40 text-amber-300 text-[9px] font-mono">
+                          {ls.activeCount}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => setAlertsEnabled(!alertsEnabled)}
+                      className={`text-[8px] px-2 py-0.5 rounded-full font-bold transition-colors ${
+                        alertsEnabled
+                          ? 'bg-emerald-900/40 text-emerald-300 ring-1 ring-emerald-700/40'
+                          : 'bg-zinc-800 text-zinc-500 ring-1 ring-zinc-700/30'
+                      }`}
+                    >
+                      {alertsEnabled ? '🔔 Alerts ON' : '🔕 Alerts OFF'}
+                    </button>
+                  </div>
+
+                  {/* Best signal card */}
+                  {ls.bestSignal && (() => {
+                    const sig = ls.bestSignal!;
+                    return (
+                      <div className={`rounded-xl p-3 mb-2 ring-1 ${
+                        sig.direction === 'LONG'
+                          ? 'bg-gradient-to-r from-emerald-950/60 to-cyan-950/40 ring-emerald-500/40'
+                          : 'bg-gradient-to-r from-rose-950/60 to-orange-950/40 ring-rose-500/40'
+                      }`}>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className={`text-lg ${sig.direction === 'LONG' ? '' : ''}`}>
+                              {sig.type === 'BOUNCE_LONG' ? '🟢⬆' : sig.type === 'BOUNCE_SHORT' ? '🔴⬇' : sig.type === 'BREAKOUT_LONG' ? '🚀⬆' : '💥⬇'}
+                            </span>
+                            <div>
+                              <div className={`text-[12px] font-black ${sig.direction === 'LONG' ? 'text-emerald-300' : 'text-rose-300'}`}>
+                                {sig.type.replace('_', ' ')}
+                              </div>
+                              <div className="text-[8px] text-zinc-500">
+                                {sig.tf} · {sig.confirmationPattern}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className={`text-[14px] font-black ${
+                              sig.grade === 'A+' ? 'text-amber-300' : sig.grade === 'A' ? 'text-emerald-300' : sig.grade === 'B' ? 'text-cyan-300' : 'text-zinc-400'
+                            }`}>
+                              {sig.grade}
+                            </div>
+                            <div className="text-[8px] text-zinc-500">{sig.confidence.toFixed(0)}% conf</div>
+                          </div>
+                        </div>
+
+                        {/* Entry / SL / TP grid */}
+                        <div className="grid grid-cols-4 gap-1.5 mb-1.5">
+                          <div className="rounded-lg bg-zinc-900/60 px-2 py-1 text-center">
+                            <div className="text-[7px] uppercase text-zinc-500 font-bold">Entry</div>
+                            <div className="text-[10px] font-mono font-bold text-white">{formatPrice(sig.entry)}</div>
+                          </div>
+                          <div className="rounded-lg bg-rose-950/40 px-2 py-1 text-center">
+                            <div className="text-[7px] uppercase text-rose-500 font-bold">Stop</div>
+                            <div className="text-[10px] font-mono font-bold text-rose-300">{formatPrice(sig.stopLoss)}</div>
+                          </div>
+                          <div className="rounded-lg bg-emerald-950/40 px-2 py-1 text-center">
+                            <div className="text-[7px] uppercase text-emerald-500 font-bold">TP1</div>
+                            <div className="text-[10px] font-mono font-bold text-emerald-300">{formatPrice(sig.takeProfit)}</div>
+                          </div>
+                          <div className="rounded-lg bg-cyan-950/40 px-2 py-1 text-center">
+                            <div className="text-[7px] uppercase text-cyan-500 font-bold">TP2</div>
+                            <div className="text-[10px] font-mono font-bold text-cyan-300">
+                              {sig.takeProfit2 ? formatPrice(sig.takeProfit2) : '—'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between text-[8px]">
+                          <span className="text-zinc-500">
+                            R:R <span className="text-white font-bold">{sig.riskReward.toFixed(1)}:1</span>
+                          </span>
+                          <span className="text-zinc-500">
+                            Level: <span className="text-white font-mono">{formatPrice(sig.level.price)}</span> ({sig.level.type})
+                          </span>
+                          <span className={`px-1 py-0.5 rounded font-bold ${
+                            sig.direction === 'LONG' ? 'bg-emerald-900/40 text-emerald-300' : 'bg-rose-900/40 text-rose-300'
+                          }`}>
+                            {sig.direction}
+                          </span>
+                        </div>
+
+                        {/* Reasons */}
+                        <div className="mt-1.5 space-y-0.5">
+                          {sig.reasons.map((r, i) => (
+                            <div key={i} className="text-[8px] text-zinc-400 flex items-start gap-1">
+                              <span className="text-zinc-600 mt-px">•</span> {r}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Other active signals */}
+                  {ls.signals.length > 1 && (
+                    <div className="space-y-1">
+                      <div className="text-[7px] uppercase text-zinc-500 font-bold tracking-wider">
+                        Other Active Signals
+                      </div>
+                      {ls.signals.slice(1, 5).map((sig, i) => (
+                        <div key={i} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg text-[9px] ${
+                          sig.direction === 'LONG' ? 'bg-emerald-950/20 ring-1 ring-emerald-900/20' : 'bg-rose-950/20 ring-1 ring-rose-900/20'
+                        }`}>
+                          <span className="text-[10px]">
+                            {sig.type === 'BOUNCE_LONG' ? '🟢' : sig.type === 'BOUNCE_SHORT' ? '🔴' : sig.type === 'BREAKOUT_LONG' ? '🚀' : '💥'}
+                          </span>
+                          <span className={`font-bold ${sig.direction === 'LONG' ? 'text-emerald-300' : 'text-rose-300'}`}>
+                            {sig.type.replace('_', ' ')}
+                          </span>
+                          <span className="text-[7px] text-zinc-600">{sig.tf}</span>
+                          <span className="font-mono text-zinc-300">{formatPrice(sig.entry)}</span>
+                          <span className={`ml-auto text-[8px] font-black ${
+                            sig.grade === 'A+' ? 'text-amber-300' : sig.grade === 'A' ? 'text-emerald-300' : sig.grade === 'B' ? 'text-cyan-300' : 'text-zinc-400'
+                          }`}>{sig.grade}</span>
+                          <span className="text-[7px] text-zinc-500">R:R {sig.riskReward.toFixed(1)}</span>
+                          <span className="text-[7px] text-zinc-600">{sig.confirmationPattern}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {ls.activeCount === 0 && (
+                    <div className="text-center py-3">
+                      <div className="text-[10px] text-zinc-500">No active signals</div>
+                      <div className="text-[8px] text-zinc-600 mt-0.5">
+                        Waiting for price to reach a level + confirmation candle...
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* ▓▓ ALERT HISTORY ▓▓ */}
+            {levelAlerts.length > 0 && (
+              <details className="rounded-xl bg-zinc-900/30 ring-1 ring-zinc-800/30 p-2">
+                <summary className="text-[8px] uppercase font-bold tracking-wider text-zinc-500 cursor-pointer select-none">
+                  📋 Alert History ({levelAlerts.length})
+                </summary>
+                <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
+                  {levelAlerts.slice(0, 15).map((sig, i) => {
+                    const age = Math.floor((Date.now() - sig.timestamp) / 60000);
+                    const ageLabel = age < 1 ? 'just now' : age < 60 ? `${age}m ago` : `${Math.floor(age / 60)}h ago`;
+                    return (
+                      <div key={i} className={`flex items-center gap-2 px-2 py-1 rounded text-[8px] ${
+                        sig.direction === 'LONG' ? 'bg-emerald-950/10' : 'bg-rose-950/10'
+                      }`}>
+                        <span className={`font-bold ${sig.direction === 'LONG' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {sig.direction}
+                        </span>
+                        <span className="text-zinc-400">{sig.type.replace('_', ' ')}</span>
+                        <span className="font-mono text-zinc-300">{formatPrice(sig.entry)}</span>
+                        <span className={`font-black ${
+                          sig.grade === 'A+' ? 'text-amber-300' : sig.grade === 'A' ? 'text-emerald-300' : 'text-cyan-300'
+                        }`}>{sig.grade}</span>
+                        <span className="text-zinc-600 ml-auto">{ageLabel}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
+            )}
+
             <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-2">🏠 Multi-Timeframe Floors &amp; Ceilings</div>
 
             {/* ▓▓ GLOBAL SUMMARY BAR ▓▓ */}
