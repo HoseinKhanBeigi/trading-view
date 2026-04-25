@@ -1,0 +1,57 @@
+//@version=6
+indicator("BTC 4H Entry Positions", overlay=true, max_lines_count=50, max_labels_count=50, max_boxes_count=20)
+
+s1on  = input.bool(true,   "Enable SHORT $73.5K", group="4H Short")
+s1z   = input.float(73500, "Zone",                 group="4H Short")
+s1e   = input.float(73300, "Entry",                group="4H Short")
+s1sl  = input.float(74200, "Stop Loss",            group="4H Short")
+s1tp  = input.float(70000, "Take Profit",          group="4H Short")
+
+s2on  = input.bool(true,   "Enable LONG $70K",    group="4H Long 1")
+s2z   = input.float(70000, "Zone",                 group="4H Long 1")
+s2e   = input.float(70200, "Entry",                group="4H Long 1")
+s2sl  = input.float(69200, "Stop Loss",            group="4H Long 1")
+s2tp  = input.float(73500, "Take Profit",          group="4H Long 1")
+
+s3on  = input.bool(true,   "Enable LONG $67K",    group="4H Long 2")
+s3z   = input.float(67000, "Zone",                 group="4H Long 2")
+s3e   = input.float(67200, "Entry",                group="4H Long 2")
+s3sl  = input.float(66200, "Stop Loss",            group="4H Long 2")
+s3tp  = input.float(73000, "Take Profit",          group="4H Long 2")
+
+if barstate.islast and s1on
+    rr = math.abs(s1e - s1tp) / math.abs(s1sl - s1e)
+    box.new(bar_index - 60, s1sl, bar_index + 40, s1z, bgcolor=color.new(color.fuchsia, 88), border_color=color.fuchsia, border_width=2)
+    line.new(bar_index - 60, s1e, bar_index + 40, s1e, color=color.yellow, width=2)
+    line.new(bar_index - 60, s1sl, bar_index + 40, s1sl, color=color.red, width=2, style=line.style_dashed)
+    line.new(bar_index - 60, s1tp, bar_index + 40, s1tp, color=color.green, width=2, style=line.style_dashed)
+    label.new(bar_index + 42, s1z, "4H SHORT ZONE $" + str.tostring(s1z, "#"), style=label.style_label_left, color=color.fuchsia, textcolor=color.white, size=size.normal)
+    label.new(bar_index + 42, s1e, "ENTRY $" + str.tostring(s1e, "#"), style=label.style_label_left, color=color.yellow, textcolor=color.black, size=size.normal)
+    label.new(bar_index + 42, s1sl, "SL $" + str.tostring(s1sl, "#"), style=label.style_label_left, color=color.red, textcolor=color.white, size=size.normal)
+    label.new(bar_index + 42, s1tp, "TP $" + str.tostring(s1tp, "#") + "  RR 1:" + str.tostring(rr, "#.#"), style=label.style_label_left, color=color.green, textcolor=color.white, size=size.normal)
+
+if barstate.islast and s2on
+    rr = math.abs(s2tp - s2e) / math.abs(s2e - s2sl)
+    box.new(bar_index - 60, s2z, bar_index + 40, s2sl, bgcolor=color.new(color.teal, 88), border_color=color.teal, border_width=2)
+    line.new(bar_index - 60, s2e, bar_index + 40, s2e, color=color.yellow, width=2)
+    line.new(bar_index - 60, s2sl, bar_index + 40, s2sl, color=color.red, width=2, style=line.style_dashed)
+    line.new(bar_index - 60, s2tp, bar_index + 40, s2tp, color=color.green, width=2, style=line.style_dashed)
+    label.new(bar_index + 42, s2z, "4H LONG ZONE $" + str.tostring(s2z, "#"), style=label.style_label_left, color=color.teal, textcolor=color.white, size=size.normal)
+    label.new(bar_index + 42, s2e, "ENTRY $" + str.tostring(s2e, "#"), style=label.style_label_left, color=color.yellow, textcolor=color.black, size=size.normal)
+    label.new(bar_index + 42, s2sl, "SL $" + str.tostring(s2sl, "#"), style=label.style_label_left, color=color.red, textcolor=color.white, size=size.normal)
+    label.new(bar_index + 42, s2tp, "TP $" + str.tostring(s2tp, "#") + "  RR 1:" + str.tostring(rr, "#.#"), style=label.style_label_left, color=color.green, textcolor=color.white, size=size.normal)
+
+if barstate.islast and s3on
+    rr = math.abs(s3tp - s3e) / math.abs(s3e - s3sl)
+    box.new(bar_index - 60, s3z, bar_index + 40, s3sl, bgcolor=color.new(color.teal, 88), border_color=color.teal, border_width=2)
+    line.new(bar_index - 60, s3e, bar_index + 40, s3e, color=color.yellow, width=2)
+    line.new(bar_index - 60, s3sl, bar_index + 40, s3sl, color=color.red, width=2, style=line.style_dashed)
+    line.new(bar_index - 60, s3tp, bar_index + 40, s3tp, color=color.green, width=2, style=line.style_dashed)
+    label.new(bar_index + 42, s3z, "4H LONG ZONE 2 $" + str.tostring(s3z, "#"), style=label.style_label_left, color=color.teal, textcolor=color.white, size=size.normal)
+    label.new(bar_index + 42, s3e, "ENTRY $" + str.tostring(s3e, "#"), style=label.style_label_left, color=color.yellow, textcolor=color.black, size=size.normal)
+    label.new(bar_index + 42, s3sl, "SL $" + str.tostring(s3sl, "#"), style=label.style_label_left, color=color.red, textcolor=color.white, size=size.normal)
+    label.new(bar_index + 42, s3tp, "TP $" + str.tostring(s3tp, "#") + "  RR 1:" + str.tostring(rr, "#.#"), style=label.style_label_left, color=color.green, textcolor=color.white, size=size.normal)
+
+alertcondition(high >= 73500, "Near 4H Short", "BTC at $73.5K 4H short zone!")
+alertcondition(low <= 70000, "Near 4H Long 1", "BTC at $70K 4H long zone!")
+alertcondition(low <= 67000, "Near 4H Long 2", "BTC at $67K 4H long zone!")

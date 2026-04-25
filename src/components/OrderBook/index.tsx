@@ -9,8 +9,16 @@ import { OrderBookStrengthTracker, type StrengthMetrics, type PredictionMetrics 
 import { predictPriceFromOrderBook, type PricePrediction } from "@/lib/price-prediction";
 import { detectOrderBlocks, getActiveOrderBlocks } from "@/lib/order-blocks";
 
-export default function OrderBookPanel() {
+interface OrderBookPanelProps {
+  /** ATAS-style: slim header, more levels, no extra panels */
+  compact?: boolean;
+  /** Number of levels to show (default 20, or 35 in compact) */
+  levels?: number;
+}
+
+export default function OrderBookPanel({ compact = false, levels: levelsProp }: OrderBookPanelProps) {
   const symbol = useMarketStore((s) => s.symbol);
+  const levels = levelsProp ?? (compact ? 35 : 20);
   const [book, setBook] = useState<OrderBook | null>(null);
   const [updatedPrices, setUpdatedPrices] = useState<Set<number>>(new Set());
   const [strength10s, setStrength10s] = useState<StrengthMetrics | null>(null);
@@ -148,11 +156,10 @@ export default function OrderBookPanel() {
     };
   }, [symbol]);
 
-  const display = useMemo(() => (book ? topN(book, 20) : { bids: [], asks: [] }), [book]);
+  const display = useMemo(() => (book ? topN(book, levels) : { bids: [], asks: [] }), [book, levels]);
   const heat = useMemo(() => {
     if (!book) return { bids: { res: [], max: 0 }, asks: { res: [], max: 0 } } as any;
-    const bids = topN(book, 20).bids;
-    const asks = topN(book, 20).asks;
+    const { bids, asks } = topN(book, levels);
     const resBids: number[] = [];
     const resAsks: number[] = [];
     let acc = 0;
@@ -162,7 +169,7 @@ export default function OrderBookPanel() {
     const maxB = resBids[resBids.length - 1] || 0;
     const maxA = resAsks[resAsks.length - 1] || 0;
     return { bids: { res: resBids, max: maxB }, asks: { res: resAsks, max: maxA } };
-  }, [book]);
+  }, [book, levels]);
   const meta = useMemo(() => (book ? { ...spreadMid(book), vwap: vwapTop20(book) } : null), [book]);
   const supportResistance = useMemo(() => {
     if (!book) return { support: [], resistance: [] };
@@ -270,20 +277,20 @@ export default function OrderBookPanel() {
   }, [pricePrediction, stablePrediction]);
 
   return (
-    <section className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 dark-mode-bg overflow-hidden">
-      <header className="px-3 py-2 border-b border-zinc-100 dark:border-zinc-800 dark-mode-bg">
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-sm font-semibold dark-mode-text">Order Book</h3>
+    <section className={`rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 dark-mode-bg overflow-hidden flex flex-col ${compact ? "min-h-0" : ""}`}>
+      <header className="px-3 py-2 border-b border-zinc-100 dark:border-zinc-800 dark-mode-bg flex-shrink-0">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold dark-mode-text">{compact ? "DOM" : "Order Book"}</h3>
           {meta && (
             <div className="text-xs text-zinc-600 dark:text-zinc-400 flex items-center gap-3">
               <span>Spread: {meta.spread.toFixed(2)}</span>
               <span>Mid: {meta.mid.toFixed(2)}</span>
-              <span>VWAP20: {meta.vwap.bid.toFixed(2)} / {meta.vwap.ask.toFixed(2)}</span>
+              {!compact && <span>VWAP20: {meta.vwap.bid.toFixed(2)} / {meta.vwap.ask.toFixed(2)}</span>}
             </div>
           )}
         </div>
         {/* Real-time Dominant Side Indicator */}
-        {dominantSide && (
+        {!compact && dominantSide && (
           <div className="mb-2">
             <div className={`flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg border-2 ${
               dominantSide.isBidStronger
@@ -312,7 +319,7 @@ export default function OrderBookPanel() {
           </div>
         )}
         {/* Price Prediction Indicator */}
-        {stablePrediction && stablePrediction.direction !== 'NEUTRAL' && (
+        {!compact && stablePrediction && stablePrediction.direction !== 'NEUTRAL' && (
           <div className="mb-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">
             <div className={`flex flex-col gap-1.5 px-3 py-2 rounded-lg border ${
               stablePrediction.direction === 'UP'
@@ -348,6 +355,7 @@ export default function OrderBookPanel() {
           </div>
         )}
         {/* Strength Indicators */}
+        {!compact && (
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center gap-3 text-xs flex-wrap">
             <StrengthIndicator label="10s" metrics={strength10s} />
@@ -358,6 +366,7 @@ export default function OrderBookPanel() {
             Based on volume (top 20 levels) • Percentages show volume distribution, values show USD amounts
           </div>
         </div>
+        )}
         {/* Predictions */}
         {/* {(prediction1m || prediction3m || prediction5m) && (
           <div className="mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">
@@ -372,7 +381,7 @@ export default function OrderBookPanel() {
           </div>
         )} */}
         {/* Order Blocks */}
-        {(orderBlocks.bullish.length > 0 || orderBlocks.bearish.length > 0) && (
+        {!compact && (orderBlocks.bullish.length > 0 || orderBlocks.bearish.length > 0) && (
           <div className="mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">
             <div className="text-[10px] text-zinc-500 dark:text-zinc-400 font-semibold mb-1.5">
               📦 Order Blocks (Institutional Zones):
@@ -479,7 +488,7 @@ export default function OrderBookPanel() {
         )}
       </header>
 
-      <div className="grid grid-cols-2 text-xs">
+      <div className={`grid grid-cols-2 text-xs ${compact ? "flex-1 min-h-0 overflow-y-auto" : ""}`}>
         <div className="p-2 space-y-1">
           <div className="grid grid-cols-[1.1fr_1.2fr_1fr] items-center gap-3 text-zinc-500 px-3 font-mono tabular-nums whitespace-nowrap">
             <span>Bid Size</span>

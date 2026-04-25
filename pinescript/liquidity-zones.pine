@@ -1,0 +1,465 @@
+//@version=6
+indicator("Liquidity Zones & Signals", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
+
+// ── Inputs ──
+swingLen       = input.int(5,    "Swing Lookback Length",  minval=2, maxval=50)
+zoneWidth      = input.float(0.5, "Zone Width %",          minval=0.1, maxval=3.0, step=0.1)
+maxZones       = input.int(10,   "Max Zones to Show",      minval=1, maxval=50)
+showRejections = input.bool(true, "Show Rejection Candles")
+wickBodyRatio  = input.float(2.0, "Min Wick/Body Ratio",   minval=1.0, maxval=5.0, step=0.5)
+
+bslColor = input.color(color.new(color.red, 70),   "Buy-Side Liquidity (above highs)")
+sslColor = input.color(color.new(color.green, 70), "Sell-Side Liquidity (below lows)")
+rejBuyColor  = input.color(color.green, "Buy Signal Color")
+rejSellColor = input.color(color.red,   "Sell Signal Color")
+
+// ── Detect Swing Highs and Lows ──
+swingHigh = ta.pivothigh(high, swingLen, swingLen)
+swingLow  = ta.pivotlow(low, swingLen, swingLen)
+
+// ── Zone Arrays ──
+var box[]   bslBoxes    = array.new_box()
+var box[]   sslBoxes    = array.new_box()
+var float[] bslLevels   = array.new_float()
+var float[] sslLevels   = array.new_float()
+var int[]   bslBars     = array.new_int()
+var int[]   sslBars     = array.new_int()
+var bool[]  bslActive   = array.new_bool()
+var bool[]  sslActive   = array.new_bool()
+
+// ── Helper: check if level is near existing zone ──
+isNearExisting(levels, price, threshold) =>
+    found = false
+    for i = 0 to (array.size(levels) > 0 ? array.size(levels) - 1 : na)
+        if not na(i) and math.abs(array.get(levels, i) - price) / price < threshold
+            found := true
+            break
+    found
+
+// ── Draw Buy-Side Liquidity (above swing highs) ──
+if not na(swingHigh)
+    level = swingHigh
+    width = level * zoneWidth / 100
+    upper = level + width
+    
+    if not isNearExisting(bslLevels, level, zoneWidth / 100)
+        b = box.new(bar_index - swingLen, upper, bar_index + 50, level, 
+             bgcolor=bslColor, border_color=color.new(color.red, 40), border_width=1)
+        label.new(bar_index - swingLen, upper, "BSL", 
+             style=label.style_label_down, color=color.new(color.red, 60), 
+             textcolor=color.white, size=size.tiny)
+        
+        array.push(bslBoxes, b)
+        array.push(bslLevels, level)
+        array.push(bslBars, bar_index - swingLen)
+        array.push(bslActive, true)
+        
+        if array.size(bslBoxes) > maxZones
+            box.delete(array.shift(bslBoxes))
+            array.shift(bslLevels)
+            array.shift(bslBars)
+            array.shift(bslActive)
+
+// ── Draw Sell-Side Liquidity (below swing lows) ──
+if not na(swingLow)
+    level = swingLow
+    width = level * zoneWidth / 100
+    lower = level - width
+
+    if not isNearExisting(sslLevels, level, zoneWidth / 100)
+        b = box.new(bar_index - swingLen, level, bar_index + 50, lower, 
+             bgcolor=sslColor, border_color=color.new(color.green, 40), border_width=1)
+        label.new(bar_index - swingLen, lower, "SSL", 
+             style=label.style_label_up, color=color.new(color.green, 60), 
+             textcolor=color.white, size=size.tiny)
+        
+        array.push(sslBoxes, b)
+        array.push(sslLevels, level)
+        array.push(sslBars, bar_index - swingLen)
+        array.push(sslActive, true)
+        
+        if array.size(sslBoxes) > maxZones
+            box.delete(array.shift(sslBoxes))
+            array.shift(sslLevels)
+            array.shift(sslBars)
+            array.shift(sslActive)
+
+// ── Extend active zone boxes to current bar ──
+for i = 0 to (array.size(bslBoxes) > 0 ? array.size(bslBoxes) - 1 : na)
+    if not na(i) and array.get(bslActive, i)
+        box.set_right(array.get(bslBoxes, i), bar_index + 20)
+
+for i = 0 to (array.size(sslBoxes) > 0 ? array.size(sslBoxes) - 1 : na)
+    if not na(i) and array.get(sslActive, i)
+        box.set_right(array.get(sslBoxes, i), bar_index + 20)
+
+// ══════════════════════════════════════════════════
+// ── ORDER FLOW APPROXIMATION ──
+// ══════════════════════════════════════════════════
+// TradingView doesn't have tick-level bid/ask data, so we approximate:
+//   - Where close sits in the bar's range tells us who won (buyers vs sellers)
+//   - High volume + small body = absorption (two sides fighting, neither wins)
+//   - Sweep into zone + absorption + delta flip = smart money trap
+
+showOrderFlow = input.bool(true, "Show Order Flow Signals", group="Order Flow")
+volSmaLen     = input.int(20,    "Volume SMA Length",       group="Order Flow", minval=5, maxval=100)
+volSpikeMulti = input.float(1.5, "Volume Spike Multiplier", group="Order Flow", minval=1.0, maxval=5.0, step=0.1)
+absorbBodyPct = input.float(0.3, "Absorption Max Body %",   group="Order Flow", minval=0.1, maxval=0.6, step=0.05)
+showDelta     = input.bool(true, "Show Delta Labels",       group="Order Flow")
+
+barRange    = high - low
+closePos    = barRange > 0 ? (close - low) / barRange : 0.5
+buyVol      = volume * closePos
+sellVol     = volume * (1.0 - closePos)
+delta       = buyVol - sellVol
+var float cumDelta = 0.0
+cumDelta   += delta
+
+volSma       = ta.sma(volume, volSmaLen)
+isVolSpike   = volume > volSma * volSpikeMulti
+bodySize_of  = math.abs(close - open)
+isAbsorption = isVolSpike and barRange > 0 and (bodySize_of / barRange) < absorbBodyPct
+
+deltaFlipBull = delta > 0 and delta[1] < 0
+deltaFlipBear = delta < 0 and delta[1] > 0
+
+cumDeltaHigh  = ta.highest(cumDelta, 10)
+cumDeltaLow   = ta.lowest(cumDelta, 10)
+bullDivergence = low < ta.lowest(low, 10)[1] and cumDelta > cumDeltaLow[1]
+bearDivergence = high > ta.highest(high, 10)[1] and cumDelta < cumDeltaHigh[1]
+
+// ── Detect Rejection Candles + Order Flow Confirmation ──
+if showRejections
+    bodySize   = math.abs(close - open)
+    upperWick  = high - math.max(close, open)
+    lowerWick  = math.min(close, open) - low
+    minBody    = syminfo.mintick
+
+    isBullishRejection = lowerWick > bodySize * wickBodyRatio and bodySize > minBody
+    isBearishRejection = upperWick > bodySize * wickBodyRatio and bodySize > minBody
+
+    for i = 0 to (array.size(sslLevels) > 0 ? array.size(sslLevels) - 1 : na)
+        if not na(i) and array.get(sslActive, i)
+            zoneLevel = array.get(sslLevels, i)
+            zoneBottom = zoneLevel - zoneLevel * zoneWidth / 100
+            priceInZone = low <= zoneLevel and low >= zoneBottom * 0.99
+
+            if priceInZone and isBullishRejection and showOrderFlow and (isAbsorption or deltaFlipBull)
+                label.new(bar_index, low, "TRAPPED\nSweep+Absorb",
+                     style=label.style_label_up, color=color.new(#00E676, 0),
+                     textcolor=color.white, size=size.normal)
+                array.set(sslActive, i, false)
+                box.set_bgcolor(array.get(sslBoxes, i), color.new(#00E676, 80))
+                break
+
+            else if priceInZone and showOrderFlow and isAbsorption and close > open
+                label.new(bar_index, low, "ABSORB",
+                     style=label.style_label_up, color=color.new(color.lime, 20),
+                     textcolor=color.white, size=size.small)
+                break
+
+            else if priceInZone and isBullishRejection
+                label.new(bar_index, low, "BUY",
+                     style=label.style_label_up, color=rejBuyColor,
+                     textcolor=color.white, size=size.small)
+                array.set(sslActive, i, false)
+                box.set_bgcolor(array.get(sslBoxes, i), color.new(color.green, 90))
+                break
+
+    for i = 0 to (array.size(bslLevels) > 0 ? array.size(bslLevels) - 1 : na)
+        if not na(i) and array.get(bslActive, i)
+            zoneLevel = array.get(bslLevels, i)
+            zoneTop = zoneLevel + zoneLevel * zoneWidth / 100
+            priceInZone = high >= zoneLevel and high <= zoneTop * 1.01
+
+            if priceInZone and isBearishRejection and showOrderFlow and (isAbsorption or deltaFlipBear)
+                label.new(bar_index, high, "TRAPPED\nSweep+Absorb",
+                     style=label.style_label_down, color=color.new(#FF1744, 0),
+                     textcolor=color.white, size=size.normal)
+                array.set(bslActive, i, false)
+                box.set_bgcolor(array.get(bslBoxes, i), color.new(#FF1744, 80))
+                break
+
+            else if priceInZone and showOrderFlow and isAbsorption and close < open
+                label.new(bar_index, high, "ABSORB",
+                     style=label.style_label_down, color=color.new(color.maroon, 20),
+                     textcolor=color.white, size=size.small)
+                break
+
+            else if priceInZone and isBearishRejection
+                label.new(bar_index, high, "SELL",
+                     style=label.style_label_down, color=rejSellColor,
+                     textcolor=color.white, size=size.small)
+                array.set(bslActive, i, false)
+                box.set_bgcolor(array.get(bslBoxes, i), color.new(color.red, 90))
+                break
+
+// ── Delta Divergence Warnings ──
+if showOrderFlow and showDelta
+    if bullDivergence and isVolSpike
+        label.new(bar_index, low - low * 0.002, "DELTA DIV\nBullish",
+             style=label.style_label_up, color=color.new(color.blue, 10),
+             textcolor=color.white, size=size.tiny)
+    if bearDivergence and isVolSpike
+        label.new(bar_index, high + high * 0.002, "DELTA DIV\nBearish",
+             style=label.style_label_down, color=color.new(color.purple, 10),
+             textcolor=color.white, size=size.tiny)
+
+// ── Mark Equal Highs / Equal Lows ──
+eqThreshold = input.float(0.3, "Equal High/Low Threshold %", minval=0.05, maxval=1.0, step=0.05)
+
+isEqualHigh = not na(swingHigh) and not na(swingHigh[swingLen * 2]) and 
+     math.abs(swingHigh - swingHigh[swingLen * 2]) / swingHigh < eqThreshold / 100
+
+isEqualLow = not na(swingLow) and not na(swingLow[swingLen * 2]) and 
+     math.abs(swingLow - swingLow[swingLen * 2]) / swingLow < eqThreshold / 100
+
+if isEqualHigh
+    label.new(bar_index - swingLen, high + high * 0.003, "EQH ⚠", 
+         style=label.style_label_down, color=color.orange, 
+         textcolor=color.white, size=size.small)
+
+if isEqualLow
+    label.new(bar_index - swingLen, low - low * 0.003, "EQL ⚠", 
+         style=label.style_label_up, color=color.orange, 
+         textcolor=color.white, size=size.small)
+
+// ══════════════════════════════════════════════════
+// ── DAILY BTC TRADE SCENARIOS ──
+// ══════════════════════════════════════════════════
+
+showScenarios = input.bool(true, "Show Daily BTC Scenarios", group="Daily Scenarios")
+
+// Scenario 1: SELL at $76K zone
+s1_enable = input.bool(true,    "Enable Scenario 1 (Short $76K)", group="Daily Scenarios")
+s1_zone   = input.float(76000,  "Scenario 1: BSL Zone",           group="Daily Scenarios")
+s1_entry  = input.float(75800,  "Scenario 1: Entry (Sell)",        group="Daily Scenarios")
+s1_stop   = input.float(78000,  "Scenario 1: Stop-Loss",           group="Daily Scenarios")
+s1_tp     = input.float(68000,  "Scenario 1: Take-Profit",         group="Daily Scenarios")
+
+// Scenario 2: BUY at $68K zone
+s2_enable = input.bool(true,    "Enable Scenario 2 (Long $68K)",  group="Daily Scenarios")
+s2_zone   = input.float(68000,  "Scenario 2: SSL Zone",            group="Daily Scenarios")
+s2_entry  = input.float(68200,  "Scenario 2: Entry (Buy)",         group="Daily Scenarios")
+s2_stop   = input.float(66000,  "Scenario 2: Stop-Loss",           group="Daily Scenarios")
+s2_tp     = input.float(76000,  "Scenario 2: Take-Profit",         group="Daily Scenarios")
+
+var line s1_zoneLine  = na
+var line s1_entryLine = na
+var line s1_stopLine  = na
+var line s1_tpLine    = na
+var box  s1_zoneBox   = na
+var label s1_lbl1     = na
+var label s1_lbl2     = na
+var label s1_lbl3     = na
+var label s1_lbl4     = na
+
+var line s2_zoneLine  = na
+var line s2_entryLine = na
+var line s2_stopLine  = na
+var line s2_tpLine    = na
+var box  s2_zoneBox   = na
+var label s2_lbl1     = na
+var label s2_lbl2     = na
+var label s2_lbl3     = na
+var label s2_lbl4     = na
+
+if showScenarios and barstate.islast
+
+    // ── Scenario 1: SHORT at $76K ──
+    if s1_enable
+        line.delete(s1_entryLine)
+        line.delete(s1_stopLine)
+        line.delete(s1_tpLine)
+        box.delete(s1_zoneBox)
+        label.delete(s1_lbl1)
+        label.delete(s1_lbl2)
+        label.delete(s1_lbl3)
+        label.delete(s1_lbl4)
+
+        s1_zoneBox := box.new(bar_index - 100, s1_zone + 500, bar_index + 60, s1_zone,
+             bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 50), border_width=2)
+
+        s1_entryLine := line.new(bar_index - 50, s1_entry, bar_index + 60, s1_entry,
+             color=color.yellow, style=line.style_solid, width=2)
+        s1_stopLine := line.new(bar_index - 50, s1_stop, bar_index + 60, s1_stop,
+             color=color.red, style=line.style_dashed, width=2)
+        s1_tpLine := line.new(bar_index - 50, s1_tp, bar_index + 60, s1_tp,
+             color=color.green, style=line.style_dashed, width=2)
+
+        rr1 = math.abs(s1_entry - s1_tp) / math.abs(s1_stop - s1_entry)
+
+        s1_lbl1 := label.new(bar_index + 62, s1_zone + 250, "SCENARIO 1: SHORT ZONE",
+             style=label.style_label_left, color=color.new(color.red, 30),
+             textcolor=color.white, size=size.normal)
+        s1_lbl2 := label.new(bar_index + 62, s1_entry, "ENTRY: " + str.tostring(s1_entry, "#.0"),
+             style=label.style_label_left, color=color.new(color.yellow, 30),
+             textcolor=color.black, size=size.small)
+        s1_lbl3 := label.new(bar_index + 62, s1_stop, "STOP: " + str.tostring(s1_stop, "#.0"),
+             style=label.style_label_left, color=color.new(color.red, 30),
+             textcolor=color.white, size=size.small)
+        s1_lbl4 := label.new(bar_index + 62, s1_tp, "TP: " + str.tostring(s1_tp, "#.0") + "  (RR 1:" + str.tostring(rr1, "#.#") + ")",
+             style=label.style_label_left, color=color.new(color.green, 30),
+             textcolor=color.white, size=size.small)
+
+    // ── Scenario 2: LONG at $68K ──
+    if s2_enable
+        line.delete(s2_entryLine)
+        line.delete(s2_stopLine)
+        line.delete(s2_tpLine)
+        box.delete(s2_zoneBox)
+        label.delete(s2_lbl1)
+        label.delete(s2_lbl2)
+        label.delete(s2_lbl3)
+        label.delete(s2_lbl4)
+
+        s2_zoneBox := box.new(bar_index - 100, s2_zone, bar_index + 60, s2_zone - 500,
+             bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 50), border_width=2)
+
+        s2_entryLine := line.new(bar_index - 50, s2_entry, bar_index + 60, s2_entry,
+             color=color.yellow, style=line.style_solid, width=2)
+        s2_stopLine := line.new(bar_index - 50, s2_stop, bar_index + 60, s2_stop,
+             color=color.red, style=line.style_dashed, width=2)
+        s2_tpLine := line.new(bar_index - 50, s2_tp, bar_index + 60, s2_tp,
+             color=color.green, style=line.style_dashed, width=2)
+
+        rr2 = math.abs(s2_tp - s2_entry) / math.abs(s2_entry - s2_stop)
+
+        s2_lbl1 := label.new(bar_index + 62, s2_zone - 250, "SCENARIO 2: LONG ZONE",
+             style=label.style_label_left, color=color.new(color.green, 30),
+             textcolor=color.white, size=size.normal)
+        s2_lbl2 := label.new(bar_index + 62, s2_entry, "ENTRY: " + str.tostring(s2_entry, "#.0"),
+             style=label.style_label_left, color=color.new(color.yellow, 30),
+             textcolor=color.black, size=size.small)
+        s2_lbl3 := label.new(bar_index + 62, s2_stop, "STOP: " + str.tostring(s2_stop, "#.0"),
+             style=label.style_label_left, color=color.new(color.red, 30),
+             textcolor=color.white, size=size.small)
+        s2_lbl4 := label.new(bar_index + 62, s2_tp, "TP: " + str.tostring(s2_tp, "#.0") + "  (RR 1:" + str.tostring(rr2, "#.#") + ")",
+             style=label.style_label_left, color=color.new(color.green, 30),
+             textcolor=color.white, size=size.small)
+
+// ══════════════════════════════════════════════════
+// ── 4H BTC TRADE SCENARIOS ──
+// ══════════════════════════════════════════════════
+
+show4H = input.bool(true, "Show 4H Scenarios", group="4H Scenarios")
+
+h4s1_enable = input.bool(true,    "Enable 4H Short ($73.5K)",  group="4H Scenarios")
+h4s1_zone   = input.float(73500,  "4H Short: BSL Zone",        group="4H Scenarios")
+h4s1_entry  = input.float(73300,  "4H Short: Entry",           group="4H Scenarios")
+h4s1_stop   = input.float(74200,  "4H Short: Stop-Loss",       group="4H Scenarios")
+h4s1_tp     = input.float(70000,  "4H Short: Take-Profit",     group="4H Scenarios")
+
+h4s2_enable = input.bool(true,    "Enable 4H Long ($70K)",     group="4H Scenarios")
+h4s2_zone   = input.float(70000,  "4H Long: SSL Zone",         group="4H Scenarios")
+h4s2_entry  = input.float(70200,  "4H Long: Entry",            group="4H Scenarios")
+h4s2_stop   = input.float(69200,  "4H Long: Stop-Loss",        group="4H Scenarios")
+h4s2_tp     = input.float(73500,  "4H Long: Take-Profit",      group="4H Scenarios")
+
+h4s3_enable = input.bool(true,    "Enable 4H Long ($67K)",     group="4H Scenarios")
+h4s3_zone   = input.float(67000,  "4H Long 2: SSL Zone",       group="4H Scenarios")
+h4s3_entry  = input.float(67200,  "4H Long 2: Entry",          group="4H Scenarios")
+h4s3_stop   = input.float(66200,  "4H Long 2: Stop-Loss",      group="4H Scenarios")
+h4s3_tp     = input.float(73000,  "4H Long 2: Take-Profit",    group="4H Scenarios")
+
+var line h4_ln1e = na, var line h4_ln1s = na, var line h4_ln1t = na
+var box h4_bx1 = na, var label h4_lb1 = na, var label h4_lb1b = na, var label h4_lb1c = na, var label h4_lb1d = na
+
+var line h4_ln2e = na, var line h4_ln2s = na, var line h4_ln2t = na
+var box h4_bx2 = na, var label h4_lb2 = na, var label h4_lb2b = na, var label h4_lb2c = na, var label h4_lb2d = na
+
+var line h4_ln3e = na, var line h4_ln3s = na, var line h4_ln3t = na
+var box h4_bx3 = na, var label h4_lb3 = na, var label h4_lb3b = na, var label h4_lb3c = na, var label h4_lb3d = na
+
+if show4H and barstate.islast
+    lft = bar_index - 40
+    rgt = bar_index + 25
+
+    // 4H Scenario 1: SHORT at $73.5K
+    if h4s1_enable
+        line.delete(h4_ln1e)
+        line.delete(h4_ln1s)
+        line.delete(h4_ln1t)
+        box.delete(h4_bx1)
+        label.delete(h4_lb1)
+        label.delete(h4_lb1b)
+        label.delete(h4_lb1c)
+        label.delete(h4_lb1d)
+
+        h4_bx1  := box.new(lft, h4s1_stop, rgt, h4s1_zone, bgcolor=color.new(color.fuchsia, 85), border_color=color.new(color.fuchsia, 50), border_width=2)
+        h4_ln1e := line.new(lft, h4s1_entry, rgt, h4s1_entry, color=color.yellow, width=2, style=line.style_solid)
+        h4_ln1s := line.new(lft, h4s1_stop, rgt, h4s1_stop, color=color.red, width=2, style=line.style_dashed)
+        h4_ln1t := line.new(lft, h4s1_tp, rgt, h4s1_tp, color=color.green, width=2, style=line.style_dashed)
+
+        h4rr1 = math.abs(h4s1_entry - h4s1_tp) / math.abs(h4s1_stop - h4s1_entry)
+        h4_lb1  := label.new(rgt + 2, h4s1_zone, "4H SHORT ZONE", style=label.style_label_left, color=color.new(color.fuchsia, 20), textcolor=color.white, size=size.normal)
+        h4_lb1b := label.new(rgt + 2, h4s1_entry, "4H ENTRY: " + str.tostring(h4s1_entry, "#.0"), style=label.style_label_left, color=color.new(color.yellow, 20), textcolor=color.black, size=size.small)
+        h4_lb1c := label.new(rgt + 2, h4s1_stop, "4H SL: " + str.tostring(h4s1_stop, "#.0"), style=label.style_label_left, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+        h4_lb1d := label.new(rgt + 2, h4s1_tp, "4H TP: " + str.tostring(h4s1_tp, "#.0") + " (RR 1:" + str.tostring(h4rr1, "#.#") + ")", style=label.style_label_left, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+
+    // 4H Scenario 2: LONG at $70K
+    if h4s2_enable
+        line.delete(h4_ln2e)
+        line.delete(h4_ln2s)
+        line.delete(h4_ln2t)
+        box.delete(h4_bx2)
+        label.delete(h4_lb2)
+        label.delete(h4_lb2b)
+        label.delete(h4_lb2c)
+        label.delete(h4_lb2d)
+
+        h4_bx2  := box.new(lft, h4s2_zone, rgt, h4s2_stop, bgcolor=color.new(color.teal, 85), border_color=color.new(color.teal, 50), border_width=2)
+        h4_ln2e := line.new(lft, h4s2_entry, rgt, h4s2_entry, color=color.yellow, width=2, style=line.style_solid)
+        h4_ln2s := line.new(lft, h4s2_stop, rgt, h4s2_stop, color=color.red, width=2, style=line.style_dashed)
+        h4_ln2t := line.new(lft, h4s2_tp, rgt, h4s2_tp, color=color.green, width=2, style=line.style_dashed)
+
+        h4rr2 = math.abs(h4s2_tp - h4s2_entry) / math.abs(h4s2_entry - h4s2_stop)
+        h4_lb2  := label.new(rgt + 2, h4s2_zone, "4H LONG ZONE", style=label.style_label_left, color=color.new(color.teal, 20), textcolor=color.white, size=size.normal)
+        h4_lb2b := label.new(rgt + 2, h4s2_entry, "4H ENTRY: " + str.tostring(h4s2_entry, "#.0"), style=label.style_label_left, color=color.new(color.yellow, 20), textcolor=color.black, size=size.small)
+        h4_lb2c := label.new(rgt + 2, h4s2_stop, "4H SL: " + str.tostring(h4s2_stop, "#.0"), style=label.style_label_left, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+        h4_lb2d := label.new(rgt + 2, h4s2_tp, "4H TP: " + str.tostring(h4s2_tp, "#.0") + " (RR 1:" + str.tostring(h4rr2, "#.#") + ")", style=label.style_label_left, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+
+    // 4H Scenario 3: LONG at $67K
+    if h4s3_enable
+        line.delete(h4_ln3e)
+        line.delete(h4_ln3s)
+        line.delete(h4_ln3t)
+        box.delete(h4_bx3)
+        label.delete(h4_lb3)
+        label.delete(h4_lb3b)
+        label.delete(h4_lb3c)
+        label.delete(h4_lb3d)
+
+        h4_bx3  := box.new(lft, h4s3_zone, rgt, h4s3_stop, bgcolor=color.new(color.teal, 85), border_color=color.new(color.teal, 50), border_width=2)
+        h4_ln3e := line.new(lft, h4s3_entry, rgt, h4s3_entry, color=color.yellow, width=2, style=line.style_solid)
+        h4_ln3s := line.new(lft, h4s3_stop, rgt, h4s3_stop, color=color.red, width=2, style=line.style_dashed)
+        h4_ln3t := line.new(lft, h4s3_tp, rgt, h4s3_tp, color=color.green, width=2, style=line.style_dashed)
+
+        h4rr3 = math.abs(h4s3_tp - h4s3_entry) / math.abs(h4s3_entry - h4s3_stop)
+        h4_lb3  := label.new(rgt + 2, h4s3_zone, "4H LONG ZONE 2", style=label.style_label_left, color=color.new(color.teal, 20), textcolor=color.white, size=size.normal)
+        h4_lb3b := label.new(rgt + 2, h4s3_entry, "4H ENTRY: " + str.tostring(h4s3_entry, "#.0"), style=label.style_label_left, color=color.new(color.yellow, 20), textcolor=color.black, size=size.small)
+        h4_lb3c := label.new(rgt + 2, h4s3_stop, "4H SL: " + str.tostring(h4s3_stop, "#.0"), style=label.style_label_left, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+        h4_lb3d := label.new(rgt + 2, h4s3_tp, "4H TP: " + str.tostring(h4s3_tp, "#.0") + " (RR 1:" + str.tostring(h4rr3, "#.#") + ")", style=label.style_label_left, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+
+// ── Price approaching zone alerts ──
+priceNearS1 = math.abs(close - s1_zone) / s1_zone < 0.01
+priceNearS2 = math.abs(close - s2_zone) / s2_zone < 0.01
+priceNear4H1 = math.abs(close - h4s1_zone) / h4s1_zone < 0.005
+priceNear4H2 = math.abs(close - h4s2_zone) / h4s2_zone < 0.005
+priceNear4H3 = math.abs(close - h4s3_zone) / h4s3_zone < 0.005
+
+alertcondition(priceNearS1 and s1_enable, "Price Near Daily Short", "BTC approaching $76K SHORT zone!")
+alertcondition(priceNearS2 and s2_enable, "Price Near Daily Long",  "BTC approaching $68K LONG zone!")
+alertcondition(priceNear4H1 and h4s1_enable, "Price Near 4H Short", "BTC approaching $73.5K 4H SHORT zone!")
+alertcondition(priceNear4H2 and h4s2_enable, "Price Near 4H Long",  "BTC approaching $70K 4H LONG zone!")
+alertcondition(priceNear4H3 and h4s3_enable, "Price Near 4H Long 2", "BTC approaching $67K 4H LONG zone!")
+
+// ── General Alerts ──
+alertcondition(not na(swingHigh), "New BSL Zone", "Buy-Side Liquidity zone detected above swing high")
+alertcondition(not na(swingLow),  "New SSL Zone", "Sell-Side Liquidity zone detected below swing low")
+
+// ── Order Flow Alerts ──
+alertcondition(isAbsorption and delta > 0, "Bullish Absorption", "High volume absorption with positive delta — big buyer absorbing sells")
+alertcondition(isAbsorption and delta < 0, "Bearish Absorption", "High volume absorption with negative delta — big seller absorbing buys")
+alertcondition(bullDivergence and isVolSpike, "Bullish Delta Divergence", "Price made new low but delta didn't — hidden buying")
+alertcondition(bearDivergence and isVolSpike, "Bearish Delta Divergence", "Price made new high but delta didn't — hidden selling")

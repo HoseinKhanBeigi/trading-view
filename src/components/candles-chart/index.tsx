@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ColorType, createChart, CandlestickSeries, LineSeries, ISeriesApi, LineStyle, IPriceLine } from "lightweight-charts";
+import { ColorType, createChart, CandlestickSeries, LineSeries, ISeriesApi, LineStyle, IPriceLine, type CandlestickData } from "lightweight-charts";
 import { localTimeFormatter } from "@/utils/time";
 import { startKlines, stopKlines } from "@/store/actions/candles";
 import { useMarketStore } from "@/store";
@@ -11,13 +11,19 @@ import { ErrorBanner } from "../ErrorBanner";
 import TimeframeButtons from "../Timeframe";
 import { fetchDepthSnapshot } from "@/lib/binance";
 import { fromSnapshot, identifySupportResistance } from "@/lib/orderbook";
+import { identifyResistanceLevels } from "@/lib/resistance-levels";
 import { detectOrderBlocks, getActiveOrderBlocks, type OrderBlock } from "@/lib/order-blocks";
 import { analyzeMirrorPatterns, type PatternAnalysis, type PatternSignal } from "@/lib/mirror-patterns";
 import { analyzePriceAction, type PriceActionAnalysis, type PriceActionSignal } from "@/lib/price-action";
 import { detectAllCandlestickPatterns, getRecentPatterns, type CandlestickPattern } from "@/lib/candlestick-patterns";
 import { generateTradeEntries, type TradeSetup, type TradeEntry } from "@/lib/trade-entries";
 
-export default function CandlesChart() {
+interface CandlesChartProps {
+  /** ATAS-style layout: chart fills container, no trade entry panel */
+  orderFlowMode?: boolean;
+}
+
+export default function CandlesChart({ orderFlowMode = false }: CandlesChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const seededRef = useRef(false);
@@ -36,6 +42,30 @@ export default function CandlesChart() {
   const signalLinesRef = useRef<IPriceLine[]>([]);
   const priceActionLinesRef = useRef<IPriceLine[]>([]);
   const tradeEntryLinesRef = useRef<IPriceLine[]>([]);
+  const atrLevelLinesRef = useRef<IPriceLine[]>([]);
+
+  type OverlayToggles = {
+    orderbookSR: boolean;
+    orderBlocks: boolean;
+    priceAction: boolean;
+    tradeEntries: boolean;
+    vwap: boolean;
+    mirror: boolean;
+    atrLevels: boolean;
+  };
+  const [overlayToggles, setOverlayToggles] = useState<OverlayToggles>({
+    orderbookSR: true,
+    orderBlocks: true,
+    priceAction: true,
+    tradeEntries: true,
+    vwap: true,
+    mirror: true,
+    atrLevels: true,
+  });
+  const overlayTogglesRef = useRef(overlayToggles);
+  overlayTogglesRef.current = overlayToggles;
+  const applyOverlaysRef = useRef<((candleData: CandlestickData[]) => void) | null>(null);
+  const [overlayMenuOpen, setOverlayMenuOpen] = useState(false);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -74,17 +104,19 @@ export default function CandlesChart() {
       lineStyle: LineStyle.Dashed,
     });
 
-    // Function to update support/resistance lines
+    // Function to update support/resistance lines (orderbook-based)
     async function updateSupportResistanceLines() {
+      if (!overlayTogglesRef.current.orderbookSR) {
+        priceLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
+        priceLinesRef.current = [];
+        return;
+      }
       const currentSymbol = useMarketStore.getState().symbol;
       if (!currentSymbol) return;
       
       try {
-        // Remove existing price lines
         priceLinesRef.current.forEach(line => {
-          try {
-            series.removePriceLine(line);
-          } catch {}
+          try { series.removePriceLine(line); } catch {}
         });
         priceLinesRef.current = [];
 
@@ -130,25 +162,19 @@ export default function CandlesChart() {
     }
 
     // Function to update order block lines
-    function updateOrderBlockLines() {
-      if (candles.length < 10) return;
-
-      // Remove existing order block lines
-      orderBlockLinesRef.current.forEach(line => {
-        try {
-          series.removePriceLine(line);
-        } catch {}
-      });
+    function updateOrderBlockLines(candleData?: CandlestickData[]) {
+      const c = candleData ?? candles;
+      orderBlockLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
       orderBlockLinesRef.current = [];
+      if (!overlayTogglesRef.current.orderBlocks || c.length < 10) return;
 
-      // Detect order blocks
-      const blocks = detectOrderBlocks(candles, {
+      const blocks = detectOrderBlocks(c, {
         lookback: 50,
         minBlockSize: 0.3,
         volumeThreshold: 1.5,
       });
 
-      const currentPrice = candles[candles.length - 1]?.close || 0;
+      const currentPrice = c[c.length - 1]?.close || 0;
       const active = getActiveOrderBlocks(blocks, currentPrice);
 
       active.bullish.slice(0, 5).forEach((block: OrderBlock) => {
@@ -196,11 +222,9 @@ export default function CandlesChart() {
 
     // Function to update price action overlays on the chart
     function updatePriceActionOverlays(analysis: PriceActionAnalysis) {
-      // Remove existing price action lines
-      priceActionLinesRef.current.forEach(line => {
-        try { series.removePriceLine(line); } catch {}
-      });
+      priceActionLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
       priceActionLinesRef.current = [];
+      if (!overlayTogglesRef.current.priceAction) return;
 
       // --- Fibonacci levels ---
       analysis.fibLevels.forEach(fib => {
@@ -301,11 +325,9 @@ export default function CandlesChart() {
 
     // Function to draw trade entry/SL/TP lines on the chart
     function updateTradeEntryOverlays(setup: TradeSetup) {
-      // Remove existing trade entry lines
-      tradeEntryLinesRef.current.forEach(line => {
-        try { series.removePriceLine(line); } catch {}
-      });
+      tradeEntryLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
       tradeEntryLinesRef.current = [];
+      if (!overlayTogglesRef.current.tradeEntries) return;
 
       const allEntries = [setup.bestEntry, ...setup.alternativeEntries].filter(Boolean) as TradeEntry[];
       allEntries.forEach((te, idx) => {
@@ -360,16 +382,46 @@ export default function CandlesChart() {
       });
     }
 
+    // ATR-based resistance/support levels
+    function updateATRResistanceLevels(candleData: CandlestickData[]) {
+      atrLevelLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
+      atrLevelLinesRef.current = [];
+      if (!overlayTogglesRef.current.atrLevels || candleData.length < 30) return;
+      const result = identifyResistanceLevels(candleData, { maxResistance: 5, maxSupport: 5 });
+      if (!result) return;
+      result.resistance.forEach((r, i) => {
+        const line = series.createPriceLine({
+          price: r.price,
+          color: i === 0 ? '#f97316' : '#fb923c',
+          lineWidth: i === 0 ? 2 : 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `R ${r.price.toFixed(2)} (${r.strength})`,
+        });
+        atrLevelLinesRef.current.push(line);
+      });
+      result.support.forEach((s, i) => {
+        const line = series.createPriceLine({
+          price: s.price,
+          color: i === 0 ? '#10b981' : '#34d399',
+          lineWidth: i === 0 ? 2 : 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `S ${s.price.toFixed(2)} (${s.strength})`,
+        });
+        atrLevelLinesRef.current.push(line);
+      });
+    }
+
     // Initial load and periodic updates
     updateSupportResistanceLines();
     const supportResistanceInterval = setInterval(updateSupportResistanceLines, 10000);
     
-    // Update order blocks when candles change
     let lastCandlesLength = candles.length;
     const unsubCandlesForBlocks = useMarketStore.subscribe((state) => {
       if (state.candles.length !== lastCandlesLength && state.candles.length > 0) {
         lastCandlesLength = state.candles.length;
-        updateOrderBlockLines();
+        updateOrderBlockLines(state.candles);
       }
     });
 
@@ -383,96 +435,93 @@ export default function CandlesChart() {
     resizeToContainer();
     chart.timeScale().fitContent();
 
-    const unsubCandles = useMarketStore.subscribe((state) => {
-      const candles = state.candles;
-      if (!candles || candles.length === 0) {
+    function applyOverlays(candleData: CandlestickData[]) {
+      if (!candleData || candleData.length === 0) {
         setLoading(true);
         return;
       }
-      series.setData(candles);
-      // compute rolling SMA as proxy VWAP bands
+      series.setData(candleData);
+      const toggles = overlayTogglesRef.current;
+
+      // VWAP bands (optional)
       const window = 50;
-      const closes = candles.map(c => c.close);
-      const times = candles.map(c => c.time);
-      const avg: { time: number; value: number }[] = [];
-      const up: { time: number; value: number }[] = [];
-      const dn: { time: number; value: number }[] = [];
-      let sum = 0;
-      for (let i = 0; i < closes.length; i++) {
-        sum += closes[i];
-        if (i >= window) sum -= closes[i - window];
-        const count = Math.min(i + 1, window);
-        const m = sum / count;
-        const t = times[i] as any;
-        avg.push({ time: t, value: m });
-        up.push({ time: t, value: m * 1.005 });
-        dn.push({ time: t, value: m * 0.995 });
+      const closes = candleData.map(c => c.close);
+      const times = candleData.map(c => c.time);
+      if (toggles.vwap && closes.length >= window) {
+        const avg: { time: number; value: number }[] = [];
+        const up: { time: number; value: number }[] = [];
+        const dn: { time: number; value: number }[] = [];
+        let sum = 0;
+        for (let i = 0; i < closes.length; i++) {
+          sum += closes[i];
+          if (i >= window) sum -= closes[i - window];
+          const count = Math.min(i + 1, window);
+          const m = sum / count;
+          const t = times[i] as any;
+          avg.push({ time: t, value: m });
+          up.push({ time: t, value: m * 1.005 });
+          dn.push({ time: t, value: m * 0.995 });
+        }
+        vwap.setData(avg as any);
+        vwapUp.setData(up as any);
+        vwapDn.setData(dn as any);
+      } else {
+        vwap.setData([] as any);
+        vwapUp.setData([] as any);
+        vwapDn.setData([] as any);
       }
-      vwap.setData(avg as any);
-      vwapUp.setData(up as any);
-      vwapDn.setData(dn as any);
-      
-      // mirrored price series around first candle open (global mirror)
-      if (candles.length > 0) {
-        const baseOpen = candles[0].open;
-        const mirrored = candles.map(c => ({
+
+      // Mirror series + mirror signals (optional)
+      if (candleData.length > 0 && toggles.mirror) {
+        const baseOpen = candleData[0].open;
+        const mirrored = candleData.map(c => ({
           time: c.time as any,
           value: 2 * baseOpen - c.close,
         }));
         mirrorSeries.setData(mirrored as any);
-
-        // Local mirror: rolling window around recent candles (last 10 candles)
         const localWindow = 10;
         const localMirrored: { time: any; value: number }[] = [];
-        for (let i = 0; i < candles.length; i++) {
+        for (let i = 0; i < candleData.length; i++) {
           const startIdx = Math.max(0, i - localWindow + 1);
-          const recentCandles = candles.slice(startIdx, i + 1);
+          const recentCandles = candleData.slice(startIdx, i + 1);
           const avgOpen = recentCandles.reduce((sum, c) => sum + c.open, 0) / recentCandles.length;
-          const currentCandle = candles[i];
-          const localMirrorValue = 2 * avgOpen - currentCandle.close;
+          const currentCandle = candleData[i];
           localMirrored.push({
             time: currentCandle.time as any,
-            value: localMirrorValue,
+            value: 2 * avgOpen - currentCandle.close,
           });
         }
         localMirrorSeries.setData(localMirrored as any);
-
-        // Analyze patterns between price and global mirror
         const mirrorValues = mirrored.map(m => m.value);
-        const analysis = analyzeMirrorPatterns(candles, mirrorValues);
+        const analysis = analyzeMirrorPatterns(candleData, mirrorValues);
         setPatternAnalysis(analysis);
-
-        // Remove existing signal lines
-        signalLinesRef.current.forEach(line => {
-          try {
-            series.removePriceLine(line);
-          } catch {}
-        });
+        signalLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
         signalLinesRef.current = [];
-
-        // Add price lines for mirror signals
-        if (analysis.signals.length > 0) {
-          analysis.signals.forEach((signal: PatternSignal) => {
-            const lineColor = signal.type === 'BUY' 
-              ? signal.strength === 'strong' ? '#10b981' : signal.strength === 'medium' ? '#34d399' : '#86efac'
-              : signal.strength === 'strong' ? '#ef4444' : signal.strength === 'medium' ? '#f87171' : '#fca5a5';
-            
-            const line = series.createPriceLine({
-              price: signal.price,
-              color: lineColor,
-              lineWidth: signal.strength === 'strong' ? 3 : signal.strength === 'medium' ? 2 : 1,
-              lineStyle: LineStyle.Dotted,
-              axisLabelVisible: true,
-              title: `${signal.type} - ${signal.pattern}`,
-            });
-            signalLinesRef.current.push(line);
+        analysis.signals.forEach((signal: PatternSignal) => {
+          const lineColor = signal.type === 'BUY' 
+            ? signal.strength === 'strong' ? '#10b981' : signal.strength === 'medium' ? '#34d399' : '#86efac'
+            : signal.strength === 'strong' ? '#ef4444' : signal.strength === 'medium' ? '#f87171' : '#fca5a5';
+          const line = series.createPriceLine({
+            price: signal.price,
+            color: lineColor,
+            lineWidth: signal.strength === 'strong' ? 3 : signal.strength === 'medium' ? 2 : 1,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: `${signal.type} - ${signal.pattern}`,
           });
-        }
+          signalLinesRef.current.push(line);
+        });
+      } else {
+        mirrorSeries.setData([] as any);
+        localMirrorSeries.setData([] as any);
+        setPatternAnalysis(null);
+        signalLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
+        signalLinesRef.current = [];
       }
 
       // ── Advanced Price Action Analysis ──
-      if (candles.length >= 15) {
-        const pa = analyzePriceAction(candles, {
+      if (candleData.length >= 15) {
+        const pa = analyzePriceAction(candleData, {
           swingLeftBars: 3,
           swingRightBars: 3,
           fvgMinGapPct: 0.03,
@@ -482,25 +531,34 @@ export default function CandlesChart() {
         setPriceAction(pa);
         updatePriceActionOverlays(pa);
 
-        // Candlestick pattern detection
-        const allPatterns = detectAllCandlestickPatterns(candles, 30);
+        const allPatterns = detectAllCandlestickPatterns(candleData, 30);
         const recent = getRecentPatterns(allPatterns, 8);
         setCandlePatterns(recent);
 
-        // ── Trade Entry Generation ──
-        const mirrorValues2 = candles.length > 0
-          ? candles.map(c => 2 * candles[0].open - c.close)
+        const mirrorValues2 = candleData.length > 0
+          ? candleData.map(c => 2 * candleData[0].open - c.close)
           : [];
-        const mirrorAnalysis2 = candles.length > 0
-          ? analyzeMirrorPatterns(candles, mirrorValues2)
+        const mirrorAnalysis2 = candleData.length > 0
+          ? analyzeMirrorPatterns(candleData, mirrorValues2)
           : null;
-        const setup = generateTradeEntries(candles, pa, recent, mirrorAnalysis2, '4h');
+        const setup = generateTradeEntries(candleData, pa, recent, mirrorAnalysis2, '4h');
         setTradeSetup(setup);
         updateTradeEntryOverlays(setup);
       }
 
+      updateOrderBlockLines(candleData);
+      updateATRResistanceLevels(candleData);
       setLoading(false);
-      
+    }
+
+    applyOverlaysRef.current = applyOverlays;
+    const unsubCandles = useMarketStore.subscribe((state) => {
+      const c = state.candles;
+      if (!c?.length) {
+        setLoading(true);
+        return;
+      }
+      applyOverlays(c);
     });
     chart.timeScale().scrollToRealTime();
 
@@ -539,11 +597,13 @@ export default function CandlesChart() {
       signalLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
       priceActionLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
       tradeEntryLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
+      atrLevelLinesRef.current.forEach(line => { try { series.removePriceLine(line); } catch {} });
       priceLinesRef.current = [];
       orderBlockLinesRef.current = [];
       signalLinesRef.current = [];
       priceActionLinesRef.current = [];
       tradeEntryLinesRef.current = [];
+      atrLevelLinesRef.current = [];
       chart.remove();
       try { ro.disconnect(); } catch {}
       themeObserver.disconnect();
@@ -551,9 +611,28 @@ export default function CandlesChart() {
     };
   }, []);
 
+  // Re-apply overlays when toggles change (e.g. after "Clear" or checking ATR R/S)
+  useEffect(() => {
+    const c = useMarketStore.getState().candles;
+    if (c?.length && applyOverlaysRef.current) applyOverlaysRef.current(c);
+  }, [overlayToggles]);
+
+  const clearChartOverlays = () => setOverlayToggles({
+    orderbookSR: false,
+    orderBlocks: false,
+    priceAction: false,
+    tradeEntries: false,
+    vwap: false,
+    mirror: false,
+    atrLevels: false,
+  });
+
+  const toggleOverlay = (key: keyof OverlayToggles, value: boolean) =>
+    setOverlayToggles((prev) => ({ ...prev, [key]: value }));
+
   return (
-    <section className="w-full">
-      <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 shadow-sm overflow-hidden ">
+    <section className={orderFlowMode ? "w-full h-full flex flex-col min-h-0" : "w-full"}>
+      <div className={`rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 shadow-sm overflow-hidden ${orderFlowMode ? "flex flex-col flex-1 min-h-0" : ""}`}>
         <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-3 border-b border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-950 transition-colors duration-200 dark-mode-bg dark-mode-text">
           <div className="flex items-center gap-3">
             {lastPrice != null && (
@@ -571,14 +650,63 @@ export default function CandlesChart() {
               <LatencyBadge />
             </div>
           </div>
-          <div className="w-full sm:w-auto"><TimeframeButtons /></div>
+          <div className="flex items-center gap-2">
+            {!orderFlowMode && (
+              <div className="relative group">
+                <button
+                  type="button"
+                  className="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                  aria-haspopup="true"
+                  aria-expanded={overlayMenuOpen}
+                  onClick={() => setOverlayMenuOpen((v) => !v)}
+                >
+                  Chart
+                </button>
+                {overlayMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-10" aria-hidden onClick={() => setOverlayMenuOpen(false)} />
+                    <div className="absolute right-0 top-full mt-1 z-20 min-w-[200px] rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-lg py-2 px-2">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 px-2 pb-1.5">Overlays</div>
+                      <button
+                        type="button"
+                        className="w-full text-left text-xs px-2 py-1.5 rounded text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/30"
+                        onClick={() => { clearChartOverlays(); setOverlayMenuOpen(false); }}
+                      >
+                        Clear all
+                      </button>
+                      {([
+                        { key: 'atrLevels' as const, label: 'ATR R/S' },
+                        { key: 'orderbookSR' as const, label: 'Orderbook S/R' },
+                        { key: 'orderBlocks' as const, label: 'Order blocks' },
+                        { key: 'priceAction' as const, label: 'Price action' },
+                        { key: 'tradeEntries' as const, label: 'Trade entries' },
+                        { key: 'vwap' as const, label: 'VWAP' },
+                        { key: 'mirror' as const, label: 'Mirror' },
+                      ]).map(({ key, label }) => (
+                        <label key={key} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer text-xs">
+                          <input
+                            type="checkbox"
+                            checked={overlayToggles[key]}
+                            onChange={(e) => toggleOverlay(key, e.target.checked)}
+                            className="rounded border-zinc-300 dark:border-zinc-600"
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+            <div className="w-full sm:w-auto"><TimeframeButtons /></div>
+          </div>
           <div className="sm:hidden flex items-center gap-2" aria-hidden="true">
             <StatusBadge />
             <LatencyBadge />
           </div>
         </header>
 
-        <div className="relative w-full h-[520px]">
+        <div className={orderFlowMode ? "relative w-full flex-1 min-h-[400px]" : "relative w-full h-[520px]"}>
           {loading && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-white/60 dark:bg-black/40 backdrop-blur-sm">
               <div className="rounded-xl bg-white/80 dark:bg-zinc-900/70 shadow-lg px-4 py-3 flex items-center gap-3">
@@ -595,13 +723,15 @@ export default function CandlesChart() {
           <div ref={chartContainerRef} className="w-full h-full " />
         </div>
 
-        <footer className="flex items-center justify-between px-3 sm:px-4 py-2 border-t border-zinc-100 dark:border-zinc-800 text-xs text-zinc-500 dark:text-zinc-400 bg-white dark:bg-zinc-950 transition-colors duration-200 dark-mode-bg">
-          <span aria-live="polite" className="truncate">Data: Binance klines (REST seed + WS live)</span>
-          <span className="hidden sm:inline">Local time shown on X‑axis</span>
-        </footer>
+        {!orderFlowMode && (
+          <footer className="flex items-center justify-between px-3 sm:px-4 py-2 border-t border-zinc-100 dark:border-zinc-800 text-xs text-zinc-500 dark:text-zinc-400 bg-white dark:bg-zinc-950 transition-colors duration-200 dark-mode-bg">
+            <span aria-live="polite" className="truncate">Data: Binance klines (REST seed + WS live)</span>
+            <span className="hidden sm:inline">Local time shown on X‑axis</span>
+          </footer>
+        )}
 
         {/* ════════ TRADE ENTRY PANEL ════════ */}
-        {tradeSetup && (
+        {!orderFlowMode && tradeSetup && (
           <div className="border-t-2 border-indigo-400 dark:border-indigo-600">
             {/* Header with bias */}
             <div className="px-3 sm:px-4 py-3 bg-gradient-to-r from-indigo-50 via-white to-indigo-50 dark:from-indigo-950/40 dark:via-zinc-900 dark:to-indigo-950/40 flex flex-wrap items-center gap-3 text-xs">
@@ -737,7 +867,7 @@ export default function CandlesChart() {
         )}
 
         {/* Mirror Pattern Analysis Panel */}
-        {patternAnalysis && patternAnalysis.signals.length > 0 && (
+        {!orderFlowMode && patternAnalysis && patternAnalysis.signals.length > 0 && (
           <div className="px-3 sm:px-4 py-2 border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50">
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <span className="font-semibold dark-mode-text">Mirror:</span>
@@ -763,7 +893,7 @@ export default function CandlesChart() {
         )}
 
         {/* ────── Advanced Price Action Panel ────── */}
-        {priceAction && (
+        {!orderFlowMode && priceAction && (
           <div className="border-t border-zinc-100 dark:border-zinc-800">
             {/* Market Structure Summary */}
             <div className="px-3 sm:px-4 py-2.5 bg-zinc-50/80 dark:bg-zinc-900/40 flex flex-wrap items-center gap-2 text-xs">
@@ -940,7 +1070,7 @@ export default function CandlesChart() {
         )}
 
         {/* ────── Candlestick Patterns Panel ────── */}
-        {candlePatterns.length > 0 && (
+        {!orderFlowMode && candlePatterns.length > 0 && (
           <div className="px-3 sm:px-4 py-2 border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/30">
             <div className="flex flex-wrap items-center gap-1.5 text-xs">
               <span className="font-semibold dark-mode-text">Candles:</span>

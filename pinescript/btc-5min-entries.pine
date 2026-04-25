@@ -1,0 +1,188 @@
+//@version=6
+indicator("5min Entry at 4H Zones", overlay=true, max_labels_count=200, max_lines_count=100, max_boxes_count=50)
+
+// ── 4H Zone Inputs ──
+// -- Liquidity Zones --
+z1on = input.bool(true, "LIQ: Below $68.4K (sweep target)", group="Liquidity Zones")
+z1hi = input.float(68400, "Zone 1 Top", group="Liquidity Zones")
+z1lo = input.float(68000, "Zone 1 Bottom", group="Liquidity Zones")
+
+z2on = input.bool(true, "LIQ: Long $67K-$67.5K (4H zone)", group="Liquidity Zones")
+z2hi = input.float(67500, "Zone 2 Top", group="Liquidity Zones")
+z2lo = input.float(67000, "Zone 2 Bottom", group="Liquidity Zones")
+
+z3on = input.bool(true, "LIQ: Above $69.4K (short stops)", group="Liquidity Zones")
+z3hi = input.float(69600, "Zone 3 Top", group="Liquidity Zones")
+z3lo = input.float(69400, "Zone 3 Bottom", group="Liquidity Zones")
+
+// -- Supply Zones --
+sup1on = input.bool(true, "Supply: $70K-$70.2K (flipped)", group="Supply Zones")
+sup1hi = input.float(70200, "Supply 1 Top", group="Supply Zones")
+sup1lo = input.float(70000, "Supply 1 Bottom", group="Supply Zones")
+
+sup2on = input.bool(true, "Supply: $69.2K-$69.4K (fresh)", group="Supply Zones")
+sup2hi = input.float(69400, "Supply 2 Top", group="Supply Zones")
+sup2lo = input.float(69200, "Supply 2 Bottom", group="Supply Zones")
+
+// -- Demand Zones --
+dem1on = input.bool(true, "Demand: $67K-$67.5K (4H+demand)", group="Demand Zones")
+dem1hi = input.float(67500, "Demand 1 Top", group="Demand Zones")
+dem1lo = input.float(67000, "Demand 1 Bottom", group="Demand Zones")
+
+// -- Trap Zones (broken demand/supply = trap for traders) --
+tr1on = input.bool(true, "TRAP: $70K demand broke (bull trap)", group="Trap Zones")
+tr1hi = input.float(70200, "Trap 1 Top", group="Trap Zones")
+tr1lo = input.float(69700, "Trap 1 Bottom", group="Trap Zones")
+
+tr2on = input.bool(true, "TRAP: $68.4K bounce (bull trap)", group="Trap Zones")
+tr2hi = input.float(69200, "Trap 2 Top", group="Trap Zones")
+tr2lo = input.float(68400, "Trap 2 Bottom", group="Trap Zones")
+
+tr3on = input.bool(true, "TRAP: $67K if breaks (bear trap risk)", group="Trap Zones")
+tr3hi = input.float(67000, "Trap 3 Top", group="Trap Zones")
+tr3lo = input.float(66500, "Trap 3 Bottom", group="Trap Zones")
+
+// ── Entry Settings ──
+wickRatio = input.float(2.0, "Wick/Body Ratio", minval=1.0, maxval=5.0, step=0.5, group="Entry")
+engulfMult = input.float(1.5, "Engulfing Size Multiplier", minval=1.0, maxval=3.0, step=0.1, group="Entry")
+swingLB = input.int(3, "Swing Lookback", minval=2, maxval=10, group="Entry")
+
+// ── Helper values ──
+bodySize = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+isGreen = close > open
+isRed = close < open
+prevBody = math.abs(close[1] - open[1])
+
+// ── Check if price is inside a zone ──
+inLiqZ1 = z1on and low <= z1hi and high >= z1lo
+inLiqZ2 = z2on and low <= z2hi and high >= z2lo
+inLiqZ3 = z3on and high >= z3lo and low <= z3hi
+inSupply1 = sup1on and high >= sup1lo and low <= sup1hi
+inSupply2 = sup2on and high >= sup2lo and low <= sup2hi
+inDemand1 = dem1on and low <= dem1hi and high >= dem1lo
+
+inBuyZone = inLiqZ1 or inLiqZ2 or inDemand1
+inSellZone = inLiqZ3 or inSupply1 or inSupply2
+
+// ── PATTERN 1: Wick Rejection ──
+bullWick = lowerWick > bodySize * wickRatio and bodySize > syminfo.mintick
+bearWick = upperWick > bodySize * wickRatio and bodySize > syminfo.mintick
+
+// ── PATTERN 2: Engulfing Candle ──
+bullEngulf = isGreen and isRed[1] and close > open[1] and open < close[1] and bodySize > prevBody * engulfMult
+bearEngulf = isRed and isGreen[1] and close < open[1] and open > close[1] and bodySize > prevBody * engulfMult
+
+// ── PATTERN 3: Break of Structure (CHoCH) ──
+swingLow = ta.pivotlow(low, swingLB, swingLB)
+swingHigh = ta.pivothigh(high, swingLB, swingLB)
+
+var float lastSwingLow = na
+var float lastSwingHigh = na
+var float prevSwingLow = na
+var float prevSwingHigh = na
+
+if not na(swingLow)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := swingLow
+
+if not na(swingHigh)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := swingHigh
+
+higherLow = not na(lastSwingLow) and not na(prevSwingLow) and lastSwingLow > prevSwingLow
+lowerHigh = not na(lastSwingHigh) and not na(prevSwingHigh) and lastSwingHigh < prevSwingHigh
+
+bullBOS = higherLow and close > lastSwingHigh
+bearBOS = lowerHigh and close < lastSwingLow
+
+// ── BUY SIGNALS at Long Zones ──
+buyWick = inBuyZone and bullWick
+buyEngulf = inBuyZone and bullEngulf
+buyBOS = inBuyZone and bullBOS
+
+// ── SELL SIGNALS at Short Zones ──
+sellWick = inSellZone and bearWick
+sellEngulf = inSellZone and bearEngulf
+sellBOS = inSellZone and bearBOS
+
+// ── Draw all zone boxes on last bar ──
+if barstate.islast
+    // Liquidity zones
+    if z1on
+        box.new(bar_index - 80, z1hi, bar_index + 20, z1lo, bgcolor=color.new(color.fuchsia, 88), border_color=color.fuchsia, border_width=2)
+        label.new(bar_index + 22, z1hi, "LIQ SHORT $" + str.tostring(z1hi, "#"), style=label.style_label_left, color=color.fuchsia, textcolor=color.white, size=size.normal)
+    if z2on
+        box.new(bar_index - 80, z2hi, bar_index + 20, z2lo, bgcolor=color.new(color.teal, 88), border_color=color.teal, border_width=2)
+        label.new(bar_index + 22, z2lo, "LIQ LONG $" + str.tostring(z2lo, "#"), style=label.style_label_left, color=color.teal, textcolor=color.white, size=size.normal)
+    if z3on
+        box.new(bar_index - 80, z3hi, bar_index + 20, z3lo, bgcolor=color.new(color.teal, 88), border_color=color.teal, border_width=2)
+        label.new(bar_index + 22, z3lo, "LIQ LONG 2 $" + str.tostring(z3lo, "#"), style=label.style_label_left, color=color.teal, textcolor=color.white, size=size.normal)
+
+    // Supply zones (red/orange)
+    if sup1on
+        box.new(bar_index - 80, sup1hi, bar_index + 20, sup1lo, bgcolor=color.new(color.red, 85), border_color=color.red, border_width=2)
+        label.new(bar_index + 22, sup1hi, "SUPPLY $" + str.tostring(sup1hi, "#"), style=label.style_label_left, color=color.red, textcolor=color.white, size=size.normal)
+    if sup2on
+        box.new(bar_index - 80, sup2hi, bar_index + 20, sup2lo, bgcolor=color.new(color.orange, 85), border_color=color.orange, border_width=2)
+        label.new(bar_index + 22, sup2hi, "SUPPLY 2 $" + str.tostring(sup2hi, "#"), style=label.style_label_left, color=color.orange, textcolor=color.white, size=size.normal)
+
+    // Demand zones (blue)
+    if dem1on
+        box.new(bar_index - 80, dem1hi, bar_index + 20, dem1lo, bgcolor=color.new(color.blue, 85), border_color=color.blue, border_width=2)
+        label.new(bar_index + 22, dem1lo, "DEMAND $" + str.tostring(dem1lo, "#"), style=label.style_label_left, color=color.blue, textcolor=color.white, size=size.normal)
+
+    // Trap zones (yellow with warning)
+    if tr1on
+        box.new(bar_index - 80, tr1hi, bar_index + 20, tr1lo, bgcolor=color.new(color.yellow, 88), border_color=color.yellow, border_width=2, border_style=line.style_dashed)
+        label.new(bar_index + 22, tr1hi, "TRAP $70K\nDemand broke!\nDon't buy here", style=label.style_label_left, color=color.new(color.yellow, 20), textcolor=color.black, size=size.normal)
+    if tr2on
+        box.new(bar_index - 80, tr2hi, bar_index + 20, tr2lo, bgcolor=color.new(color.yellow, 88), border_color=color.yellow, border_width=2, border_style=line.style_dashed)
+        label.new(bar_index + 22, tr2hi, "TRAP $68.4K\nWeak bounce!\nStops below", style=label.style_label_left, color=color.new(color.yellow, 20), textcolor=color.black, size=size.normal)
+    if tr3on
+        box.new(bar_index - 80, tr3hi, bar_index + 20, tr3lo, bgcolor=color.new(color.yellow, 88), border_color=color.orange, border_width=2, border_style=line.style_dashed)
+        label.new(bar_index + 22, tr3lo, "TRAP RISK $67K\nIf breaks = bear trap\nIf holds = best buy", style=label.style_label_left, color=color.new(color.orange, 20), textcolor=color.white, size=size.normal)
+
+// ── Plot BUY signals ──
+if buyWick
+    label.new(bar_index, low, "BUY\nWICK", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.normal)
+
+if buyEngulf
+    label.new(bar_index, low, "BUY\nENGULF", style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.normal)
+
+if buyBOS
+    label.new(bar_index, low, "BUY\nCHoCH", style=label.style_label_up, color=color.aqua, textcolor=color.black, size=size.normal)
+
+// ── Plot SELL signals ──
+if sellWick
+    label.new(bar_index, high, "SELL\nWICK", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.normal)
+
+if sellEngulf
+    label.new(bar_index, high, "SELL\nENGULF", style=label.style_label_down, color=color.maroon, textcolor=color.white, size=size.normal)
+
+if sellBOS
+    label.new(bar_index, high, "SELL\nCHoCH", style=label.style_label_down, color=color.fuchsia, textcolor=color.white, size=size.normal)
+
+// ── Draw stop-loss lines on signals ──
+if buyWick or buyEngulf or buyBOS
+    line.new(bar_index, low, bar_index + 15, low, color=color.red, width=1, style=line.style_dashed)
+    label.new(bar_index + 15, low, "SL", style=label.style_label_left, color=color.red, textcolor=color.white, size=size.tiny)
+
+if sellWick or sellEngulf or sellBOS
+    line.new(bar_index, high, bar_index + 15, high, color=color.red, width=1, style=line.style_dashed)
+    label.new(bar_index + 15, high, "SL", style=label.style_label_left, color=color.red, textcolor=color.white, size=size.tiny)
+
+// ── Background color when inside a zone ──
+bgcolor(inBuyZone ? color.new(color.teal, 95) : na)
+bgcolor(inSellZone ? color.new(color.fuchsia, 95) : na)
+
+// ── Alerts ──
+alertcondition(buyWick, "Buy Wick Signal", "5min Buy Wick Rejection in 4H zone!")
+alertcondition(buyEngulf, "Buy Engulf Signal", "5min Buy Engulfing in 4H zone!")
+alertcondition(buyBOS, "Buy CHoCH Signal", "5min Break of Structure in 4H zone!")
+alertcondition(sellWick, "Sell Wick Signal", "5min Sell Wick Rejection in 4H zone!")
+alertcondition(sellEngulf, "Sell Engulf Signal", "5min Sell Engulfing in 4H zone!")
+alertcondition(sellBOS, "Sell CHoCH Signal", "5min Break of Structure in 4H zone!")
+alertcondition(inBuyZone and not inBuyZone[1], "Entered Buy Zone", "Price entered a 4H buy zone!")
+alertcondition(inSellZone and not inSellZone[1], "Entered Sell Zone", "Price entered a 4H sell zone!")
